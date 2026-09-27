@@ -1,0 +1,201 @@
+name: Release
+
+# A tag, never a branch. Releasing is a deliberate act, and a workflow that
+# publishes on every merge to main publishes whatever happened to land that
+# afternoon. The decision to ship then belongs to whoever pressed the merge
+# button, which is not where anybody thinks it is.
+#
+# `v*` and not `v[0-9]*`: the tag is checked against main below and the built
+# binary is checked against the tag, so a mistyped tag fails on something that
+# says what is wrong rather than on a pattern that quietly never runs.
+on:
+  push:
+    tags:
+      - 'v*'
+
+# One run per tag, and never cancelled. CI cancels a superseded run because
+# nobody is reading it any more; a release that is cancelled halfway has
+# already created the release and uploaded some of its assets, and the repair
+# is somebody deleting files by hand.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: build the tag and publish it
+    runs-on: ubuntu-latest
+
+    # Creating a release and attaching assets writes to this repository's
+    # contents, and that is the whole list. No `packages`, no `id-token`, no
+    # `pull-requests`: this job builds a tagged commit and runs its test suite,
+    # so whatever that commit can make the runner do is bounded by what the
+    # token in the same job can reach. The token is also set on the publish
+    # step alone rather than on the job, so the build and the tests never run
+    # with it in their environment.
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history and every tag, because the Makefile stamps VERSION
+          # from `git describe --tags`. A shallow checkout hands describe a
+          # commit with no tag behind it, it falls back to the abbreviated
+          # hash, and the release ships binaries whose User-Agent the control
+          # plane's logs cannot attribute to a version anybody released. The
+          # ancestry check below needs the same history to mean anything.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          # The version in go.mod, so CI and a laptop disagree about nothing.
+          go-version-file: go.mod
+
+      # A tag on a side branch ships code to customers that main never saw. It
+      # costs one command to prevent here; noticing it later means working
+      # backwards from a version number, and version numbers all look alike.
+      #
+      # main is fetched by name rather than trusted to be present: what the
+      # checkout leaves behind for a tag push is the tag, and a comparison
+      # against a ref that does not exist is one that cannot fail.
+      - name: the tag is reachable from main
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "Tag $GITHUB_REF_NAME points at $GITHUB_SHA, which is not on main."
+            echo "Releases are built from main. Merge the commit first, then"
+            echo "delete this tag and tag the merged commit."
+            exit 1
+          fi
+
+      # The same rule ci.yml enforces, restated rather than depended on:
+      # `needs` does not reach across workflows, and CI does not run on tags,
+      # so the alternative was releasing on the strength of a check that never
+      # ran against this commit. Five lines is a cheap copy; `make check`
+      # below is the part that stays in one place.
+      - name: the dependency tree is still empty
+        run: |
+          if grep -q '^require' go.mod; then
+            echo "go.mod has grown a require block."
+            echo "This binary holds a credential that reaches a customer's"
+            echo "production site, and its dependency tree being auditable in"
+            echo "an afternoon is the argument for that. See README.md."
+            exit 1
+          fi
+
+      # `dist` depends on `check` in the Makefile, so gofmt, vet and the tests
+      # all run before a single binary is built and nothing here can skip them
+      # to save two minutes. There is deliberately no separate `make check`
+      # step in front of this one: it would run the whole suite twice, and two
+      # invocations are two things that can come to disagree about what a
+      # release was tested with.
+      #
+      # The four platforms and the SHA256SUMS beside them are the Makefile's
+      # business. Restating that loop in YAML would mean a release built by
+      # something nobody can run on a laptop.
+      - name: test, then build every platform
+        run: make dist
+
+      # The stamp is the point of the full checkout, so it is checked rather
+      # than assumed: a `-X main.version` that silently stops working leaves
+      # every customer running a binary that calls itself "dev", and the
+      # control plane's logs cannot tell one such release from another.
+      #
+      # Only the runner's own architecture can be executed. The other three
+      # come out of the same `make dist` with the same VERSION, so this checks
+      # the stamp rather than samples the binaries. `git describe --tags` is
+      # what produced it and the tag is what it must equal.
+      - name: the binaries report the tag
+        run: |
+          reported="$(./dist/vallic-linux-amd64 --version)"
+          if [ "$reported" != "$GITHUB_REF_NAME" ]; then
+            echo "dist/vallic-linux-amd64 reports '$reported', tag is '$GITHUB_REF_NAME'."
+            echo "VERSION comes from 'git describe --tags' in the Makefile."
+            exit 1
+          fi
+
+      # SHA256SUMS is written by the same make run that built the binaries, so
+      # this cannot fail for an ordinary reason. It is here because the way it
+      # would fail is one stale line among four correct ones, which no reviewer
+      # catches by eye, and a checksum file nobody checked is precisely what
+      # this release is not allowed to hand to a customer.
+      - name: the checksums match the binaries
+        working-directory: dist
+        run: sha256sum -c SHA256SUMS
+
+      # Into the runner's temp directory rather than the working tree. What
+      # was built is a clean checkout of the tag, and a file this job drops
+      # beside it is one more thing somebody has to account for when they go
+      # back and ask what exactly was shipped.
+      #
+      # The last paragraph is the one that has to be there. Somebody reading
+      # this page will otherwise assume the checksums on it are what protects
+      # them, and they are not: these bytes and these checksums come from the
+      # same place, so together they prove a download was not corrupted and
+      # say nothing at all about the release itself. The checksum that is
+      # checked on every `vallic self-update` is pinned on the control plane,
+      # which is a second system an attacker would also have to hold.
+      - name: release notes
+        run: |
+          {
+            printf 'Linux and macOS, amd64 and arm64.\n\n'
+            printf 'Download the file for your platform, make it executable, and put it\n'
+            printf 'on your PATH. No credential is needed to download it.\n\n'
+            printf '## Checksums\n\n'
+            printf '```\n'
+            cat dist/SHA256SUMS
+            printf '```\n\n'
+            printf 'These verify that a download arrived intact. They are not what\n'
+            printf '`vallic self-update` checks against: the version to run and the\n'
+            printf 'SHA-256 of each file are pinned on the control plane, and an update\n'
+            printf 'whose bytes do not match that pin is refused. The binary and the\n'
+            printf 'checksum deliberately come from two systems, so neither one alone\n'
+            printf 'decides what a customer ends up running.\n'
+          } > "$RUNNER_TEMP/notes.md"
+
+      # `gh` ships on the runner. A third-party release action would be a
+      # dependency with a contents:write token, in a repository whose argument
+      # for trusting it is that its dependency tree is empty and auditable in
+      # an afternoon.
+      #
+      # A hyphen in the tag makes it a pre-release, which is SemVer's own rule:
+      # everything after the first hyphen is a pre-release identifier, so
+      # v1.2.0-rc1, v1.2.0-beta.2 and v2.0.0-alpha are all caught by the shape
+      # rather than by a list of words somebody has to keep adding to. It is
+      # built, tested and published like any other, because an rc nobody can
+      # install is an rc nobody tests; marking it keeps GitHub from serving it
+      # as "latest", which is what a package manager, an install script and a
+      # person clicking through this page all follow. Nothing reaches a
+      # customer from it by accident, and self-update cannot see it at all:
+      # the control plane decides which version is current, and pinning an rc
+      # there is a separate deliberate act.
+      #
+      # --verify-tag because gh otherwise creates a tag that is not there,
+      # pointing at the default branch's tip. The tag does exist here, since
+      # pushing it is what started this run; the case it guards is the tag
+      # being deleted while the job ran, where the alternative is a release
+      # whose tag names a commit these binaries were not built from.
+      #
+      # The assets are globbed rather than listed. The four platforms are the
+      # Makefile's list; a second copy here is a copy that goes stale the day
+      # somebody adds one, and `make dist` already fails the build rather than
+      # leaving a platform out.
+      - name: publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=()
+          case "$GITHUB_REF_NAME" in
+            *-*) args+=(--prerelease) ;;
+          esac
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            "${args[@]}" \
+            dist/vallic-* \
+            dist/SHA256SUMS

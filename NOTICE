@@ -1,0 +1,15 @@
+vallic
+Copyright 2026 Vallic d.o.o.
+
+This product includes software developed at Vallic d.o.o. (https://vallic.com).
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+This binary has no third-party dependencies: go.mod carries no require block,
+and CI fails if one appears. Everything here is either the Go standard library,
+which is distributed under its own BSD-style licence, or was written for this
+repository. There is consequently nothing further to attribute.
+
+"Vallic" and the Vallic logo are trademarks. The licence above covers the code
+and grants no right to use the marks, which is the ordinary pairing: the source
+may be forked and redistributed freely, and a fork may not be called vallic.

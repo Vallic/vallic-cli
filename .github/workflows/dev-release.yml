@@ -1,0 +1,180 @@
+name: Dev release
+
+# Every push to dev, which is the opposite of release.yml's rule and for the
+# same reason. That workflow refuses to publish on a merge because the decision
+# to ship then belongs to whoever pressed the merge button; a dev channel that
+# only moves when somebody remembers to tag is not a dev channel, it is a
+# slower stable one. What makes this safe is on the other side: the control
+# plane serves dev to nobody unless an installation is set to it or a person
+# passes --dev, so publishing here reaches a customer through no path at all.
+on:
+  push:
+    branches:
+      - dev
+
+# Newest wins. Unlike release.yml, a superseded dev build is genuinely not
+# wanted: two pushes a minute apart would otherwise race to create tags and
+# releases, and the one that lost would leave a pre-release nobody asked for
+# pinned behind the one that won. Cancelling before the tag is created is the
+# cheap half of that; the other half is that nothing here pins anything on the
+# control plane, which is still a deliberate act.
+concurrency:
+  group: dev-release
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: build dev and publish it as a pre-release
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Every tag, because the version below is derived from the newest
+          # released one. A shallow checkout would find no tags, the base would
+          # fall back to 0.0.0, and every dev build would call itself a
+          # pre-release of a version that already shipped.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Restated from release.yml rather than shared, for the reason stated
+      # there: `needs` does not reach across workflows. A dev build with a
+      # dependency tree is a dev build that gets merged.
+      - name: the dependency tree is still empty
+        run: |
+          if grep -q '^require' go.mod; then
+            echo "go.mod has grown a require block."
+            echo "See README.md."
+            exit 1
+          fi
+
+      # The agent's shape, exactly: `0.5.112-dev-202609241830`. Base version,
+      # then `-dev-`, then a UTC build stamp.
+      #
+      # The base is the *next* patch after the newest release, not that release
+      # itself: a dev build is what the next version is becoming, and naming it
+      # after the version already shipped would make `0.4.0-dev-…` sort before
+      # the 0.4.0 that customers are running. SemVer puts any pre-release
+      # before its own release, so the base has to be the version ahead.
+      #
+      # The stamp is what makes two builds of the same commit distinguishable,
+      # which they have to be: the whole point of a per-build pre-release is
+      # being able to name the one to go back to.
+      - name: work out the version
+        id: version
+        run: |
+          set -eu
+          # Released versions only. A previous dev pre-release is tagged too,
+          # and counting one would make the base climb a patch per push.
+          latest="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)"
+          if [ -z "$latest" ]; then
+            # Nothing released yet, so the next version is the first one.
+            base="0.1.0"
+          else
+            trimmed="${latest#v}"
+            major="${trimmed%%.*}"
+            rest="${trimmed#*.}"
+            minor="${rest%%.*}"
+            patch="${rest#*.}"
+            base="$major.$minor.$((patch + 1))"
+          fi
+          version="$base-dev-$(date -u +%Y%m%d%H%M)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "Building $version from $(git rev-parse --short HEAD)."
+
+      # VERSION is passed rather than left to `git describe`, which is what the
+      # Makefile falls back to and which would produce a tag-plus-offset string
+      # here. The tag does not exist yet: it is created below, from the binaries
+      # that were built with this name stamped into them, so the order is
+      # build-then-tag and not the other way round.
+      #
+      # `dist` depends on `check`, so gofmt, vet and the tests all run before a
+      # binary exists. A dev channel with a lower bar than stable is a dev
+      # channel whose failures nobody trusts.
+      - name: test, then build every platform
+        run: make dist VERSION=${{ steps.version.outputs.version }}
+
+      - name: the binaries report that version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          reported="$(./dist/vallic-linux-amd64 --version)"
+          if [ "$reported" != "$VERSION" ]; then
+            echo "dist/vallic-linux-amd64 reports '$reported', built as '$VERSION'."
+            exit 1
+          fi
+
+      - name: the checksums match the binaries
+        working-directory: dist
+        run: sha256sum -c SHA256SUMS
+
+      - name: release notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          {
+            printf 'A build from `dev`, at `%s`.\n\n' "$(git rev-parse --short HEAD)"
+            printf 'This is not a release. It is here to be tried before a version is cut,\n'
+            printf 'and the control plane serves it to nobody by default:\n\n'
+            printf '```\n'
+            printf 'vallic self-update --dev\n'
+            printf '```\n\n'
+            printf 'That asks for this channel once. It is not remembered, so the next\n'
+            printf '`vallic self-update` goes back to the released build.\n\n'
+            printf '## Checksums\n\n'
+            printf '```\n'
+            cat dist/SHA256SUMS
+            printf '```\n\n'
+            printf 'These verify that a download arrived intact and nothing more. What\n'
+            printf '`self-update` checks against is pinned on the control plane, which is\n'
+            printf 'a second system: the bytes and the digest come from different places\n'
+            printf 'on purpose, so neither alone decides what gets run.\n'
+          } > "$RUNNER_TEMP/notes.md"
+
+      # --target, and the tag created by this call rather than pushed first.
+      # The tag names the commit these binaries were built from, and creating it
+      # here means there is no window in which it exists without them.
+      #
+      # --prerelease is not inferred from the hyphen the way release.yml infers
+      # it: it is stated, because every build from this workflow is one and a
+      # rule that happened to produce the right answer is one that stops doing
+      # so quietly. GitHub then never serves these as `latest`, which is what
+      # an install script and a person clicking through the releases page both
+      # follow.
+      - name: publish the pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --prerelease \
+            dist/vallic-* \
+            dist/SHA256SUMS
+
+      # Said rather than done. Pinning is `scripts/publish-cli.py --channel dev`
+      # in the vallic repository, and it stays a separate deliberate act for the
+      # reason the stable path does: this workflow can prove a binary was built
+      # and checksummed, and cannot prove anybody wanted it served.
+      - name: how to serve it
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          echo "Published $TAG. Nothing serves it yet."
+          echo
+          echo "In the vallic repository:"
+          echo "  gh release download $TAG --repo Vallic/vallic-cli --pattern SHA256SUMS"
+          echo "  python3 scripts/publish-cli.py --channel dev --version ${TAG#v} --sha256sums ./SHA256SUMS"

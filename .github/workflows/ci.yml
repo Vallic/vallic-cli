@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# One run per branch. A superseded run tells you about a commit nobody is
+# looking at any more, and the smoke job spends a real control plane's time.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: gofmt, vet, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # The version in go.mod, so CI and a laptop disagree about nothing.
+          go-version-file: go.mod
+
+      # What `make check` runs, kept as the Makefile target rather than
+      # restated here: a contributor running it locally has to be running the
+      # same thing CI does, or "works on my machine" is a real answer.
+      - run: make check
+
+      # No `go mod download`, and no cache step for one either. There is
+      # nothing to download: go.mod has no require block and that is a rule
+      # this binary is held to, so a cache that started helping would mean the
+      # rule had been broken.
+      - name: the dependency tree is still empty
+        run: |
+          if grep -q '^require' go.mod; then
+            echo "go.mod has grown a require block."
+            echo "This binary holds a credential that reaches a customer's"
+            echo "production site, and its dependency tree being auditable in"
+            echo "an afternoon is the argument for that. See README.md."
+            exit 1
+          fi
+
+  smoke:
+    name: against a control plane
+    runs-on: ubuntu-latest
+    # After check, because a binary that does not compile has nothing to say
+    # about a control plane, and this job spends a real one's time.
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Every test here skips itself when these are empty, so a pull request
+      # from a fork — which gets no secrets, and should not — stays green and
+      # says in its log that it read nothing.
+      #
+      # Read-only by construction: nothing in internal/smoke deploys,
+      # restores, backs up, claims a hostname or writes a variable. That is
+      # not caution for its own sake. A --release check against a control
+      # plane with a live agent once queued a real deployment and the agent
+      # ran it.
+      - name: smoke
+        env:
+          VALLIC_API: ${{ secrets.SMOKE_VALLIC_API }}
+          VALLIC_TOKEN: ${{ secrets.SMOKE_VALLIC_TOKEN }}
+        run: make smoke
