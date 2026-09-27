@@ -96,7 +96,41 @@ const (
 
 	// CodeUnauthorized is a credential the control plane does not accept.
 	CodeUnauthorized = "unauthorized"
+
+	// CodeRateLimited is one token asking too often -- 600 requests a minute,
+	// counted per token rather than per person, so a runaway CI job does not
+	// lock its team out of the console. The message says to wait and repeat
+	// the request unchanged, and that is exactly what a poll should do.
+	CodeRateLimited = "rate_limited"
+
+	// CodeTooManyAttempts is too many *failed* credentials from one address:
+	// twenty in fifteen minutes. A different thing entirely, and the
+	// difference matters to what the CLI says -- the credential in hand may
+	// be perfectly good, and retrying is the one thing that will not help.
+	CodeTooManyAttempts = "too_many_attempts"
 )
+
+// IsRateLimited reports whether the control plane asked for a pause.
+//
+// By status rather than by code, because both limits answer 429 and a poll
+// should back off for either -- and because a 429 from something in front of
+// the control plane, an edge proxy or a CDN, carries no code of ours at all
+// and means the same thing.
+func IsRateLimited(err error) bool {
+	var apiErr *Error
+
+	return errors.As(err, &apiErr) && apiErr.Status == http.StatusTooManyRequests
+}
+
+// IsGuessingRefusal reports whether an address has spent its failed attempts.
+//
+// Separated from IsRateLimited because the advice is opposite: waiting fixes a
+// volume limit, and for this one the credential itself is usually the problem.
+func IsGuessingRefusal(err error) bool {
+	var apiErr *Error
+
+	return errors.As(err, &apiErr) && apiErr.Code == CodeTooManyAttempts
+}
 
 // NeedsReauthentication reports whether an error is a step-up challenge.
 //

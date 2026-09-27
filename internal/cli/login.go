@@ -270,6 +270,25 @@ func finishLogin(ctx context.Context, env *Env, creds *auth.Credentials) error {
 
 	me, err := client.Me(ctx)
 	if err != nil {
+		if api.IsGuessingRefusal(err) {
+			// Checked before the unauthorized branch, which this would
+			// otherwise be read as. The difference is the whole message: the
+			// credential in hand may be perfectly good, and the one thing
+			// that will not help is minting another and trying again — which
+			// is precisely what the sentence below would send somebody off to
+			// do, spending attempts against a limit they have already hit.
+			//
+			// Counted per address and cleared as soon as one credential
+			// works, so on a shared runner it can be somebody else's typos
+			// that used them up.
+			return fmt.Errorf(
+				"%w\n"+
+					"  this is an address that has presented too many credentials that did not work, not a verdict on this one\n"+
+					"  wait for the window to pass and sign in again; minting another token now will not help",
+				err,
+			)
+		}
+
 		if api.IsUnauthorized(err) {
 			// Three things look identical from here: revoked, mistyped, and
 			// run out. Expiry is named because it is the one that happens to

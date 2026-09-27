@@ -257,6 +257,7 @@ func (e *Env) follow(ctx context.Context, client *api.Client, id int, out io.Wri
 	interval := minInterval
 	offset := 0
 	state := ""
+	limited := 0
 
 	// Every poll costs a request whether or not it returns anything, and a
 	// transient failure mid-deploy is not a failed deploy: the work is
@@ -274,8 +275,40 @@ func (e *Env) follow(ctx context.Context, client *api.Client, id int, out io.Wri
 				)
 			}
 
-			// A 5xx or a dropped connection is worth retrying; a refusal is
-			// not — a 404 or a 403 will answer the same way forever.
+			// 429 is the one 4xx that means "ask again". The control plane
+			// limits a token to 600 requests a minute and says, in as many
+			// words, to wait and repeat the request unchanged — so returning
+			// here would abandon a deploy that is still running, over a
+			// pause the server asked for. Counted separately and waited out
+			// for longer than a 5xx, because the window it is waiting for is
+			// a minute wide.
+			if api.IsRateLimited(err) {
+				limited++
+
+				if limited >= maxLimited {
+					return state, fmt.Errorf(
+						"%w\n  still rate limited after %s; the deploy is unaffected and may still be running\n"+
+							"  watch it with: vallic activity log %d --follow",
+						err, (time.Duration(maxLimited) * rateLimitWait).Round(time.Second), id,
+					)
+				}
+
+				// Once, not on every retry: a wall of identical warnings is
+				// how somebody stops reading them.
+				if limited == 1 {
+					e.Printer.Warn("rate limited by the control plane; waiting rather than giving up on the deploy")
+				}
+
+				if waitErr := sleep(ctx, rateLimitWait); waitErr != nil {
+					return state, waitErr
+				}
+
+				continue
+			}
+
+			// A 5xx or a dropped connection is worth retrying; any other
+			// refusal is not — a 404 or a 403 will answer the same way
+			// forever.
 			var apiErr *api.Error
 			if errors.As(err, &apiErr) && apiErr.Status < 500 {
 				return state, err
@@ -294,6 +327,7 @@ func (e *Env) follow(ctx context.Context, client *api.Client, id int, out io.Wri
 		}
 
 		failures = 0
+		limited = 0
 		state = log.State
 
 		// A log shorter than where we were reading means retention removed it
@@ -316,9 +350,21 @@ func (e *Env) follow(ctx context.Context, client *api.Client, id int, out io.Wri
 		}
 
 		if log.Truncated {
-			// More is already written. Asking again at once is not
-			// impatience; it is the server saying so.
+			// More is already written, so this asks again immediately rather
+			// than waiting out a backoff for bytes that exist — but not
+			// *without* waiting. This branch used to `continue` with no sleep
+			// at all, and a loop whose only brake is the round trip runs at
+			// whatever the network allows: measured at 23,873 requests a
+			// second against a local control plane, which is 2,387 times the
+			// 600 a minute one token is allowed, and still several times over
+			// it across the internet. A deploy with a log bigger than one
+			// window would rate-limit its own token within seconds.
+			if waitErr := sleep(ctx, drainGap); waitErr != nil {
+				return state, waitErr
+			}
+
 			interval = minInterval
+
 			continue
 		}
 
@@ -334,6 +380,34 @@ func (e *Env) follow(ctx context.Context, client *api.Client, id int, out io.Wri
 		}
 	}
 }
+
+// drainGap is the least time between two reads of the same log.
+//
+// The ceiling it keeps this under is the control plane's: 600 requests a
+// minute per token, which is ten a second. At 200ms this loop asks five times
+// a second at most, leaving half the token's allowance for everything else
+// using it — which on a CI runner is every other job sharing that credential,
+// because the limit counts the token and not the machine.
+//
+// It costs nothing worth having. A window is 256 KiB, so draining still moves
+// at better than a megabyte a second, and the case this protects is the one
+// where that matters least: a log already written, being read after the fact.
+const drainGap = 200 * time.Millisecond
+
+// rateLimitWait is how long to wait out a 429, and how many times.
+//
+// The volume window is a minute wide, so riding one out takes up to a minute:
+// eight waits of ten seconds covers it with room to spare. Slow, and the
+// alternative is what this replaced — abandoning a running deploy the first
+// time the server asked for a pause.
+//
+// Variables rather than constants only so the tests that hold this behaviour
+// do not have to spend eighty seconds proving it. Nothing outside a test
+// changes them.
+var (
+	rateLimitWait = 10 * time.Second
+	maxLimited    = 8
+)
 
 // sleep waits, or gives up if the context does first.
 func sleep(ctx context.Context, d time.Duration) error {
@@ -494,6 +568,14 @@ the control plane says which of those it is.`,
 
 				if !log.Truncated {
 					return nil
+				}
+
+				// The same brake `follow` has, for the same reason: without
+				// it this is a tight request loop over however many windows
+				// the log is long, and the token it is spending belongs to
+				// everything else using that credential.
+				if err := sleep(ctx, drainGap); err != nil {
+					return err
 				}
 			}
 		},

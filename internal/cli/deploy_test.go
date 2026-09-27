@@ -1,10 +1,19 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/vallic/vallic-cli/internal/api"
+	"github.com/vallic/vallic-cli/internal/auth"
+	"github.com/vallic/vallic-cli/internal/output"
 )
 
 // A named release from another branch is worth saying, and must not be refused.
@@ -53,4 +62,126 @@ func TestBranchWarningStaysQuietWhenTheBranchesAgree(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The drain path must not run as fast as the network allows.
+//
+// It did. `truncated` means the control plane already holds more than it just
+// sent, so this branch asks again at once rather than waiting out a backoff --
+// and it used to do that with no sleep whatsoever. Measured against a loopback
+// server that always says `truncated`, the loop made 23,873 requests a second:
+// 1.4 million a minute, against a control plane that allows one token 600. A
+// deploy whose log ran past a single 256 KiB window would rate-limit its own
+// token within seconds, and the token is shared by every CI job using that
+// credential.
+//
+// Asserted as a ceiling on the rate rather than by counting sleeps, because
+// the rate is the thing that matters and it survives the loop being rewritten.
+func TestTheDrainPathIsRateLimitedBelowWhatThePlatformAllows(t *testing.T) {
+	var requests int64
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&requests, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"log":{"offset":0,"content":"x","next_offset":1,` +
+			`"size":999999,"truncated":true,"state":"running","complete":false}}`))
+	}))
+	defer server.Close()
+
+	env, _, _ := followEnv(t)
+	client := api.New(server.URL, auth.Anonymous{}, "test")
+
+	const window = 1200 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), window)
+	defer cancel()
+
+	start := time.Now()
+	_, _ = env.follow(ctx, client, 1, io.Discard)
+	elapsed := time.Since(start)
+
+	perMinute := float64(atomic.LoadInt64(&requests)) / elapsed.Seconds() * 60
+
+	// The platform's own ceiling, and half of it is the budget this loop may
+	// take: the rest belongs to everything else holding the same token.
+	const platformLimit = 600.0
+
+	if perMinute > platformLimit/2 {
+		t.Errorf("drain asked %.0f times a minute, want at most %.0f (the platform allows %.0f per token)",
+			perMinute, platformLimit/2, platformLimit)
+	}
+}
+
+// A 429 is the one 4xx a poll must not give up on.
+//
+// The control plane's message is "wait and repeat the request unchanged", and
+// the loop used to return on any status below 500 -- so the first rate limit
+// mid-deploy abandoned a deploy that was still running, after four requests.
+// This asserts it rides it out instead, and that the deploy's own outcome is
+// what comes back.
+func TestAFollowRidesOutARateLimitInsteadOfAbandoningTheDeploy(t *testing.T) {
+	var requests int64
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := atomic.AddInt64(&requests, 1)
+		w.Header().Set("Content-Type", "application/json")
+
+		// Limited in the middle, then the deploy finishes. What a token that
+		// went briefly over its minute looks like.
+		switch n {
+		case 1:
+			_, _ = w.Write([]byte(`{"log":{"offset":0,"content":"step\n","next_offset":5,` +
+				`"size":5,"truncated":false,"state":"running","complete":false}}`))
+		case 2:
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"code":"rate_limited",` +
+				`"message":"This token has made more than 600 requests in 60 seconds."}}`))
+		default:
+			_, _ = w.Write([]byte(`{"log":{"offset":5,"content":"done\n","next_offset":10,` +
+				`"size":10,"truncated":false,"state":"succeeded","complete":true}}`))
+		}
+	}))
+	defer server.Close()
+
+	env, _, errOut := followEnv(t)
+	client := api.New(server.URL, auth.Anonymous{}, "test")
+
+	// The real wait is ten seconds and there is nothing to learn from
+	// spending it here: what is under test is that it waits at all and comes
+	// back with the deploy's outcome, not how long.
+	restore := rateLimitWait
+	rateLimitWait = 20 * time.Millisecond
+
+	defer func() { rateLimitWait = restore }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	state, err := env.follow(ctx, client, 1, io.Discard)
+	if err != nil {
+		t.Fatalf("follow: %v, want it to wait and carry on", err)
+	}
+
+	if state != "succeeded" {
+		t.Errorf("state = %q, want the deploy's own outcome", state)
+	}
+
+	// Said once, so somebody watching knows why it went quiet.
+	if !strings.Contains(errOut.String(), "rate limited") {
+		t.Errorf("stderr = %q, want it to say why it paused", errOut.String())
+	}
+}
+
+// followEnv is an Env that writes where a test can read it.
+func followEnv(t *testing.T) (*Env, *bytes.Buffer, *bytes.Buffer) {
+	t.Helper()
+
+	var out, errOut bytes.Buffer
+
+	printer, err := output.NewPrinter(&out, &errOut, "table")
+	if err != nil {
+		t.Fatalf("printer: %v", err)
+	}
+
+	return &Env{Out: &out, Err: &errOut, Printer: printer}, &out, &errOut
 }
