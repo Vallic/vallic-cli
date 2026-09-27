@@ -257,7 +257,12 @@ func (e *Env) follow(ctx context.Context, client *api.Client, id int, out io.Wri
 	interval := minInterval
 	offset := 0
 	state := ""
-	limited := 0
+
+	// Spent on waiting out rate limits, and not replenished by a request that
+	// worked: a token that keeps going over its minute is one this should stop
+	// watching for, rather than follow for ever ten seconds at a time.
+	budget := rateLimitBudget
+	warned := false
 
 	// Every poll costs a request whether or not it returns anything, and a
 	// transient failure mid-deploy is not a failed deploy: the work is
@@ -283,23 +288,39 @@ func (e *Env) follow(ctx context.Context, client *api.Client, id int, out io.Wri
 			// for longer than a 5xx, because the window it is waiting for is
 			// a minute wide.
 			if api.IsRateLimited(err) {
-				limited++
+				wait, asked := rateLimitPause(err)
 
-				if limited >= maxLimited {
+				// Bounded by time spent, not by a number of tries, because
+				// what a Retry-After asks for is a duration: one wait of
+				// forty seconds and four of ten are the same outlay, and
+				// counting attempts would treat them differently.
+				if wait > budget {
+					// Longer than this is willing to sit inside a deploy
+					// watch. Said with the figure, because "gave up" and
+					// "was told to come back in twenty minutes" call for
+					// different things from the person reading it.
 					return state, fmt.Errorf(
-						"%w\n  still rate limited after %s; the deploy is unaffected and may still be running\n"+
-							"  watch it with: vallic activity log %d --follow",
-						err, (time.Duration(maxLimited) * rateLimitWait).Round(time.Second), id,
+						"%w\n  it asked for %s, which is longer than this will wait while watching a deploy\n"+
+							"  the deploy is unaffected and may still be running; reattach with: vallic activity log %d --follow",
+						err, wait.Round(time.Second), id,
 					)
 				}
 
 				// Once, not on every retry: a wall of identical warnings is
 				// how somebody stops reading them.
-				if limited == 1 {
-					e.Printer.Warn("rate limited by the control plane; waiting rather than giving up on the deploy")
+				if !warned {
+					warned = true
+
+					if asked {
+						e.Printer.Warn("rate limited; the control plane asked for %s, waiting rather than giving up on the deploy", wait.Round(time.Second))
+					} else {
+						e.Printer.Warn("rate limited by the control plane; waiting rather than giving up on the deploy")
+					}
 				}
 
-				if waitErr := sleep(ctx, rateLimitWait); waitErr != nil {
+				budget -= wait
+
+				if waitErr := sleep(ctx, wait); waitErr != nil {
 					return state, waitErr
 				}
 
@@ -327,7 +348,6 @@ func (e *Env) follow(ctx context.Context, client *api.Client, id int, out io.Wri
 		}
 
 		failures = 0
-		limited = 0
 		state = log.State
 
 		// A log shorter than where we were reading means retention removed it
@@ -402,12 +422,38 @@ const drainGap = 200 * time.Millisecond
 // time the server asked for a pause.
 //
 // Variables rather than constants only so the tests that hold this behaviour
-// do not have to spend eighty seconds proving it. Nothing outside a test
+// do not have to spend a minute and a half proving it. Nothing outside a test
 // changes them.
 var (
+	// rateLimitWait is used only where the response asked for nothing. The
+	// control plane's own limiter sends no Retry-After, deliberately: its
+	// flood backend cannot say when a window frees. Ten seconds is a guess at
+	// a sixty-second window, and six of them cover one.
 	rateLimitWait = 10 * time.Second
-	maxLimited    = 8
+
+	// rateLimitBudget is the total this will spend waiting before it stops
+	// watching. Wider than the volume window so a token that went briefly
+	// over is followed through it, and narrow enough that a genuinely
+	// hammered one does not hold a terminal all afternoon.
+	rateLimitBudget = 90 * time.Second
 )
+
+// rateLimitPause is how long to wait, and whether the server said so.
+//
+// A Retry-After is obeyed in preference to the guess above, which is the whole
+// point of reading it: the server knows when its window frees and this does
+// not. It is not clamped downwards — a server asking for longer than this
+// would guess is the case where guessing is worst — but it is measured against
+// the budget by the caller, which is where refusing to wait belongs.
+func rateLimitPause(err error) (wait time.Duration, asked bool) {
+	var apiErr *api.Error
+
+	if errors.As(err, &apiErr) && apiErr.RetryAfter > 0 {
+		return apiErr.RetryAfter, true
+	}
+
+	return rateLimitWait, false
+}
 
 // sleep waits, or gives up if the context does first.
 func sleep(ctx context.Context, d time.Duration) error {

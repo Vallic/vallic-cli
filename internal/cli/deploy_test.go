@@ -185,3 +185,102 @@ func followEnv(t *testing.T) (*Env, *bytes.Buffer, *bytes.Buffer) {
 
 	return &Env{Out: &out, Err: &errOut, Printer: printer}, &out, &errOut
 }
+
+// A Retry-After is obeyed in preference to the CLI's own guess.
+//
+// The whole point of reading the header: the server knows when its window
+// frees and this does not. The control plane sends none today, so the case
+// under test is something in front of it — a proxy, a CDN — whose limit this
+// client never reasoned about.
+func TestAFollowObeysRetryAfterRatherThanItsOwnGuess(t *testing.T) {
+	var requests int64
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := atomic.AddInt64(&requests, 1)
+		w.Header().Set("Content-Type", "application/json")
+
+		switch n {
+		case 1:
+			_, _ = w.Write([]byte(`{"log":{"offset":0,"content":"step\n","next_offset":5,` +
+				`"size":5,"truncated":false,"state":"running","complete":false}}`))
+		case 2:
+			// Shorter than rateLimitWait below, so obeying it is the only way
+			// this finishes inside the deadline.
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"code":"rate_limited","message":"slow down"}}`))
+		default:
+			_, _ = w.Write([]byte(`{"log":{"offset":5,"content":"done\n","next_offset":10,` +
+				`"size":10,"truncated":false,"state":"succeeded","complete":true}}`))
+		}
+	}))
+	defer server.Close()
+
+	env, _, errOut := followEnv(t)
+	client := api.New(server.URL, auth.Anonymous{}, "test")
+
+	// The guess is made long on purpose: if it were used, this would not
+	// finish before the deadline and the test would fail on the timeout.
+	restoreWait, restoreBudget := rateLimitWait, rateLimitBudget
+	rateLimitWait = time.Hour
+	rateLimitBudget = 90 * time.Second
+
+	defer func() { rateLimitWait, rateLimitBudget = restoreWait, restoreBudget }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	state, err := env.follow(ctx, client, 1, io.Discard)
+	if err != nil {
+		t.Fatalf("follow: %v, want it to wait the second it was asked for", err)
+	}
+
+	if state != "succeeded" {
+		t.Errorf("state = %q, want the deploy's own outcome", state)
+	}
+
+	// The figure is repeated back, because "waiting" and "waiting twenty
+	// minutes" are different things to be told while watching a deploy.
+	if !strings.Contains(errOut.String(), "asked for 1s") {
+		t.Errorf("stderr = %q, want it to name what was asked for", errOut.String())
+	}
+}
+
+// And a Retry-After longer than the budget stops the watch rather than
+// honouring it.
+//
+// Obeying without a ceiling is how a terminal ends up held for an afternoon
+// by one header. The deploy is unaffected either way, so the useful thing is
+// to say the figure and how to reattach.
+func TestARetryAfterLongerThanTheBudgetIsRefusedWithTheFigure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "1800")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"code":"rate_limited","message":"slow down"}}`))
+	}))
+	defer server.Close()
+
+	env, _, _ := followEnv(t)
+	client := api.New(server.URL, auth.Anonymous{}, "test")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err := env.follow(ctx, client, 77, io.Discard)
+
+	if err == nil {
+		t.Fatal("waited half an hour inside a deploy watch, or did not report giving up")
+	}
+
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("took %v to refuse; it must not sleep first", elapsed)
+	}
+
+	for _, want := range []string{"30m", "vallic activity log 77"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to mention %q", err, want)
+		}
+	}
+}

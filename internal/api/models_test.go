@@ -3,11 +3,13 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func ptr[T any](v T) *T { return &v }
@@ -261,3 +263,97 @@ func query(raw, key string) string {
 type anonymous struct{}
 
 func (anonymous) Token() (string, error) { return "", nil }
+
+// Retry-After is read in both forms RFC 9110 allows, and nothing else.
+//
+// Worth a table because the two forms come from different places — an origin
+// server tends to send delta-seconds and a CDN an HTTP-date — and the CLI sees
+// whichever sits in front of the control plane that day. The control plane's
+// own limiter sends neither, on purpose: its flood backend cannot say when a
+// window frees.
+func TestRetryAfterReadsBothFormsAndNothingElse(t *testing.T) {
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+
+	for _, tc := range []struct {
+		name   string
+		header string
+		want   time.Duration
+	}{
+		{"delta seconds", "120", 2 * time.Minute},
+		{"delta seconds with spaces", "  45 ", 45 * time.Second},
+		{"http date", "Sun, 27 Sep 2026 12:00:30 GMT", 30 * time.Second},
+		{"absent", "", 0},
+
+		// Each of these would be a wait, if it were trusted. Zero instead, so
+		// the caller falls back to its own schedule rather than sleeping for a
+		// negative duration or for whatever an unparseable string coerces to.
+		{"zero", "0", 0},
+		{"negative", "-30", 0},
+		{"a date already past", "Sun, 27 Sep 2026 11:59:00 GMT", 0},
+		{"nonsense", "soon", 0},
+		{"a float, which the grammar does not allow", "1.5", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := retryAfter(tc.header, now); got != tc.want {
+				t.Errorf("retryAfter(%q) = %v, want %v", tc.header, got, tc.want)
+			}
+		})
+	}
+}
+
+// And it reaches the error a caller branches on, from a real response.
+//
+// Asserted through a server rather than by calling retryAfter directly,
+// because the half that broke in every previous version of this kind of bug
+// was the wiring, not the parser.
+func TestARateLimitCarriesWhatTheResponseAskedFor(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "42")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"code":"rate_limited","message":"too many"}}`))
+	}))
+	defer server.Close()
+
+	client := New(server.URL, anonymous{}, "test")
+
+	_, err := client.Me(context.Background())
+
+	if !IsRateLimited(err) {
+		t.Fatalf("err = %v, want it recognised as a rate limit", err)
+	}
+
+	var apiErr *Error
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v, want an *Error", err)
+	}
+
+	if apiErr.RetryAfter != 42*time.Second {
+		t.Errorf("RetryAfter = %v, want 42s", apiErr.RetryAfter)
+	}
+}
+
+// A body with no envelope carries it too — which is the case that matters
+// most, because that is what something in front of the control plane answers,
+// and those limits are not the ones this client reasoned about.
+func TestARetryAfterSurvivesAResponseWithNoEnvelope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "7")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("Too Many Requests"))
+	}))
+	defer server.Close()
+
+	client := New(server.URL, anonymous{}, "test")
+
+	_, err := client.Me(context.Background())
+
+	var apiErr *Error
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v, want an *Error", err)
+	}
+
+	if apiErr.RetryAfter != 7*time.Second {
+		t.Errorf("RetryAfter = %v, want 7s", apiErr.RetryAfter)
+	}
+}

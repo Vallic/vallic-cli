@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -63,6 +64,16 @@ type Error struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
 	Status  int    `json:"-"`
+
+	// RetryAfter is what the response's Retry-After header asked for, or zero
+	// where it said nothing or said something unreadable.
+	//
+	// Not part of the envelope: it is a header, and often not one of ours. The
+	// control plane's own rate limiter deliberately sends none, because the
+	// flood backend cannot say when a window frees — but a proxy, a CDN or a
+	// WAF in front of it will, and that is the case where guessing is worst,
+	// because those limits are not the ones this client reasoned about.
+	RetryAfter time.Duration `json:"-"`
 }
 
 func (e *Error) Error() string {
@@ -279,6 +290,8 @@ func decodeError(res *http.Response, raw []byte) error {
 
 	if err := json.Unmarshal(raw, &envelope); err == nil && envelope.Error != nil {
 		envelope.Error.Status = res.StatusCode
+		envelope.Error.RetryAfter = retryAfter(res.Header.Get("Retry-After"), time.Now())
+
 		return envelope.Error
 	}
 
@@ -293,7 +306,48 @@ func decodeError(res *http.Response, raw []byte) error {
 	}
 
 	return &Error{
-		Status:  res.StatusCode,
-		Message: strings.TrimSpace(fmt.Sprintf("the control plane answered %s. %s", res.Status, message)),
+		Status:     res.StatusCode,
+		Message:    strings.TrimSpace(fmt.Sprintf("the control plane answered %s. %s", res.Status, message)),
+		RetryAfter: retryAfter(res.Header.Get("Retry-After"), time.Now()),
 	}
+}
+
+// retryAfter reads a Retry-After header, in either form RFC 9110 allows.
+//
+// Delta-seconds (`120`) and an HTTP-date (`Wed, 21 Oct 2026 07:28:00 GMT`) are
+// both legal and both are seen in the wild: origin servers tend to send the
+// first and CDNs the second. Parsed here rather than at the caller so there is
+// one place that is wrong if it is wrong.
+//
+// Zero for anything this cannot read, which is the honest answer and lets a
+// caller fall back to its own schedule. Zero also for a date in the past: a
+// clock skewed the wrong way would otherwise produce a negative wait, and a
+// header that has already elapsed is asking for nothing.
+//
+// `now` is a parameter so this is testable without the clock.
+func retryAfter(header string, now time.Time) time.Duration {
+	header = strings.TrimSpace(header)
+
+	if header == "" {
+		return 0
+	}
+
+	if seconds, err := strconv.Atoi(header); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+
+		return time.Duration(seconds) * time.Second
+	}
+
+	when, err := http.ParseTime(header)
+	if err != nil {
+		return 0
+	}
+
+	if wait := when.Sub(now); wait > 0 {
+		return wait
+	}
+
+	return 0
 }
