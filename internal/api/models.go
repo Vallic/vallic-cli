@@ -1060,6 +1060,32 @@ func (m *StringMap) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// Build is a build the control plane started.
+//
+// Answered by a 202: a build is minutes of somebody else's machine, so what
+// comes back is what was started rather than what it produced.
+type Build struct {
+	// Release is the entity id, which is what the platform's own logs name.
+	Release int `json:"release"`
+
+	// ReleaseNumber is the project's own sequence -- what `--release` takes and
+	// what to print. Nil against a control plane that could not read it back.
+	ReleaseNumber *int `json:"release_number"`
+
+	Environment string `json:"environment"`
+	GitRef      string `json:"git_ref"`
+
+	// WillDeploy is what happens when the build finishes, not what was asked
+	// for: an environment that watches this branch deploys the result whether
+	// or not anybody asked, because that is what auto-deploy means.
+	WillDeploy bool `json:"will_deploy"`
+
+	// DeployRequested is whether this request asked for it, so the difference
+	// between "because you said so" and "because this environment always does"
+	// can be said out loud.
+	DeployRequested bool `json:"deploy_requested"`
+}
+
 // CronJob is one scheduled command.
 type CronJob struct {
 	Name     string `json:"name"`

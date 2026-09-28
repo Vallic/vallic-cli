@@ -159,6 +159,25 @@ func (c *Client) Releases(ctx context.Context, projectID int, limit int, branch 
 	return out.Releases, nil
 }
 
+// Build builds what the environment's branch points at now.
+//
+// deploy asks for the result to be deployed here when it finishes. Sent always
+// rather than only when true, because the control plane's default and this
+// one's are the same and a body that says which is a body that cannot drift.
+func (c *Client) Build(ctx context.Context, environmentID int, deploy bool) (*Build, error) {
+	var out struct {
+		Build Build `json:"build"`
+	}
+
+	body := map[string]any{"deploy": deploy}
+
+	if err := c.post(ctx, fmt.Sprintf("/environments/%d/build", environmentID), body, &out); err != nil {
+		return nil, err
+	}
+
+	return &out.Build, nil
+}
+
 // Rollback puts the release the current one replaced back.
 func (c *Client) Rollback(ctx context.Context, environmentID int) (*Deployment, error) {
 	return c.queueDeployment(ctx, fmt.Sprintf("/environments/%d/rollback", environmentID))
@@ -204,17 +223,15 @@ func (c *Client) Deploy(ctx context.Context, environmentID int, release int) (*D
 }
 
 // EnvironmentVariables lists everything in effect for an environment,
-// inherited definitions included.
-func (c *Client) EnvironmentVariables(ctx context.Context, environmentID int) ([]Variable, error) {
-	var out struct {
-		Variables []Variable `json:"variables"`
-	}
+// inherited definitions included, and whether the site has it yet.
+func (c *Client) EnvironmentVariables(ctx context.Context, environmentID int) (*VariableList, error) {
+	var out VariableList
 
 	if err := c.get(ctx, fmt.Sprintf("/environments/%d/variables", environmentID), &out); err != nil {
 		return nil, err
 	}
 
-	return out.Variables, nil
+	return &out, nil
 }
 
 // ProjectVariables lists what a project defines, before any environment

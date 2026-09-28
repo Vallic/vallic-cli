@@ -27,8 +27,9 @@ func varCommand() *Command {
 		Aliases: []string{"variable"},
 		Summary: "read and write environment variables",
 		Long: `A variable reaches a container through the rendered .env, which is
-written on a deploy — so setting one does not change a running site until the
-next one.
+written on a deploy or by ` + "`var apply`" + ` — so setting one does not change a running
+site until one of those. Set several, then apply once: every apply restarts
+the site.
 
 A secret is never readable, by anybody, once written. That is the point of
 marking one: the platform stores it and does not hand it back. ` + "`var list`" + `
@@ -44,6 +45,7 @@ environment that does not override it.`,
 			varGetCommand(),
 			varSetCommand(),
 			varDeleteCommand(),
+			varApplyCommand(),
 		},
 	}
 }
@@ -80,6 +82,7 @@ environment overrides it.`,
 			var (
 				variables []api.Variable
 				where     string
+				pending   *bool
 			)
 
 			if chosen == scopeProject {
@@ -101,7 +104,12 @@ environment overrides it.`,
 				}
 
 				where = target.Environment.Name
-				variables, err = client.EnvironmentVariables(ctx, target.Environment.ID)
+
+				var list *api.VariableList
+				list, err = client.EnvironmentVariables(ctx, target.Environment.ID)
+				if list != nil {
+					variables, pending = list.Variables, list.Pending
+				}
 			}
 
 			if err != nil {
@@ -121,10 +129,29 @@ environment overrides it.`,
 				})
 			}
 
-			return env.Printer.Print(table, map[string]any{
+			data := map[string]any{
 				chosen:      where,
 				"variables": variables,
-			})
+			}
+
+			// Only where the control plane said. Absent rather than false
+			// when it did not, so a script can tell the two apart.
+			if pending != nil {
+				data["pending"] = *pending
+			}
+
+			if err := env.Printer.Print(table, data); err != nil {
+				return err
+			}
+
+			// After the table, where it is read: the values listed are the
+			// saved ones, and this is the one case where the site disagrees.
+			if pending != nil && *pending && !env.Printer.Structured() {
+				env.Printer.Warn("not applied yet: %s is still running with the previous values", where)
+				env.Printer.Say("  `vallic var apply %s` restarts it with these, or they go out with the next deploy", where)
+			}
+
+			return nil
 		},
 	}
 }
@@ -326,6 +353,7 @@ which keeps it out of shell history and out of ` + "`ps`" + `:
 			// platform ignored them. In the control plane's own words, so it
 			// stays true if the platform's answer ever changes.
 			env.Printer.Say("  it reaches the site on the %s", takesEffect(result.TakesEffect))
+			env.Printer.Say("  or now, with `vallic var apply%s`", applyHint(chosen))
 
 			if chosen == scopeProject {
 				env.Printer.Say("  every environment that does not override it will see it")
@@ -405,10 +433,117 @@ one with ` + "`--scope project`" + `, deliberately.`,
 
 			env.Printer.Good("%s removed from %s", name, where)
 			env.Printer.Say("  it leaves the site on the %s", takesEffect(removed.TakesEffect))
+			env.Printer.Say("  or now, with `vallic var apply%s`", applyHint(chosen))
 
 			return nil
 		},
 	}
+}
+
+func varApplyCommand() *Command {
+	var scope string
+
+	return &Command{
+		Name:    "apply",
+		Summary: "restart the site with its variables now",
+		Usage:   "var apply [<env>] [--scope project]",
+		Long: `Setting a variable does not change a running site: its containers keep
+the values they were started with until the next deploy. apply sends them now
+instead. The site and its workers restart with the saved values, which takes a
+few seconds; the database and other services keep running.
+
+Set several, then apply once: every apply is a restart.
+
+` + "`--scope project`" + ` applies to every environment still running on values the
+project has since changed, and names each. Where none is behind, it says so
+and succeeds, so a script can run it after every change.
+
+It exits non-zero when an environment could not be reached just now — a
+machine being rebuilt, say. Its variables then go out with its next deploy,
+or run it again in a minute.`,
+		Flags: scopeFlag(&scope),
+		Run: func(ctx context.Context, env *Env, args []string) error {
+			chosen, err := variableScope(scope)
+			if err != nil {
+				return err
+			}
+
+			client, err := env.Client()
+			if err != nil {
+				return err
+			}
+
+			var result *api.VariablesApplied
+
+			if chosen == scopeProject {
+				if err := ensureNoExtra(nil, args, 0); err != nil {
+					return err
+				}
+
+				project, resolveErr := env.ResolveProject(ctx)
+				if resolveErr != nil {
+					return resolveErr
+				}
+
+				result, err = client.ApplyProjectVariables(ctx, project.ID)
+			} else {
+				if err := ensureNoExtra(nil, args, 1); err != nil {
+					return err
+				}
+
+				target, resolveErr := env.ResolveEnvironment(ctx, first(args))
+				if resolveErr != nil {
+					return resolveErr
+				}
+
+				result, err = client.ApplyEnvironmentVariables(ctx, target.Environment.ID)
+			}
+
+			if err != nil {
+				return err
+			}
+
+			if env.Printer.Structured() {
+				if err := env.Printer.Value(result); err != nil {
+					return err
+				}
+			} else {
+				reportApplied(env, result)
+			}
+
+			if len(result.Unreachable) > 0 {
+				return fmt.Errorf("%d environment(s) could not be reached; their variables go out with the next deploy", len(result.Unreachable))
+			}
+
+			return nil
+		},
+	}
+}
+
+// reportApplied says what `var apply` did, one line per environment.
+func reportApplied(env *Env, result *api.VariablesApplied) {
+	if len(result.Applied) == 0 && len(result.Unreachable) == 0 {
+		env.Printer.Say("Every environment already has these values. Nothing to apply.")
+
+		return
+	}
+
+	for _, slug := range result.Applied {
+		env.Printer.Good("%s is restarting with its variables", slug)
+	}
+
+	for _, slug := range result.Unreachable {
+		env.Printer.Warn("%s could not be reached just now", slug)
+	}
+}
+
+// applyHint is the flag `var apply` needs to act where a write just did.
+func applyHint(scope string) string {
+	if scope == scopeProject {
+		return " --scope project"
+	}
+
+	return ""
 }
 
 // scopeFlag registers --scope on a command.

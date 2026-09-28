@@ -108,6 +108,12 @@ const (
 	// CodeUnauthorized is a credential the control plane does not accept.
 	CodeUnauthorized = "unauthorized"
 
+	// CodeNotBuildable is a branch that cannot be built right now: no such
+	// branch on the host, a repository host that cannot be reached, a project
+	// with no build machine yet. 409 rather than 400 because nothing about the
+	// request was wrong and a retry once the cause is fixed is exactly right.
+	CodeNotBuildable = "not_buildable"
+
 	// CodeRateLimited is one token asking too often -- 600 requests a minute,
 	// counted per token rather than per person, so a runaway CI job does not
 	// lock its team out of the console. The message says to wait and repeat

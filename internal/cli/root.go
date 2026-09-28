@@ -56,12 +56,19 @@ to production.`,
 			// Deploying.
 			deployCommand(),
 			rollbackCommand(),
+			// Before deploy in the list because it is before it in the
+			// order of work: a build produces the release a deploy ships.
+			buildCommand(),
 			redeployCommand(),
 			releaseCommand(),
 			activityCommand(),
 			// Where the site's own logs are, which is not here. Beside
 			// activity because the two names are the ones people confuse.
 			logsCommand(),
+
+			// Shell plumbing. Last because it is about the terminal rather
+			// than about anything on the platform.
+			completionCommand(),
 
 			// Keeping this binary current. A question about the binary
 			// itself rather than about anything on the platform, which is
