@@ -30,6 +30,27 @@ $ vallic mount download ./files
 ## Installing
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/Vallic/vallic-cli/main/installer.sh | bash
+```
+
+Linux and macOS, amd64 and arm64. Needs `curl` and one of `sha256sum` or
+`shasum`, and nothing else — an installer that pulls in a package manager first
+is not a one-line installer. It lands in `/usr/local/bin` where that is
+writable and `~/.local/bin` otherwise; `VALLIC_INSTALL_DIR` overrides both.
+
+**It asks the control plane which version to install, not GitHub**, and that is
+the point rather than an implementation detail. GitHub holds the bytes and the
+control plane holds their SHA-256, so they are two systems an attacker would
+both have to hold: a digest served by whoever served the binary can only say
+the download arrived intact. Nothing is installed unless the checksum matches,
+and the control plane also decides *which* version a customer should run, so a
+tag that exists but was thought better of is not something this will hand you.
+`VALLIC_API` points it at another control plane. Its own version is `--version`
+away and `vallic self-update` reads the same endpoint.
+
+Or with Go:
+
+```bash
 go install github.com/vallic/vallic-cli/cmd/vallic@latest
 ```
 
@@ -199,7 +220,7 @@ when it is left off.
 | `logs` | Where the site's own request and error logs go — the project's destination and the machine's copy. Not a tail: Vallic Cloud does not keep them |
 | `ssh` · `sql` · `db` · `mount` | Getting inside |
 | `drush` | `drush` in the container, over the same forced command `ssh --` uses |
-| `var list\|get\|set\|delete` | Variables, at either scope |
+| `var list\|get\|set\|delete\|apply` | Variables, at either scope; `apply` restarts the site with them now |
 | `domain list\|add\|verify\|delete` | Hostnames, and the DNS each one needs |
 | `service list` | The stack, and the versions that go in `vallic.yaml` |
 | `backup list\|create\|download\|restore` | Copies, and putting one back |

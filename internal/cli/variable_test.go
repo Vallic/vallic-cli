@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/vallic/vallic-cli/internal/api"
 )
 
 func TestVariableScopeRefusesAnythingElse(t *testing.T) {
@@ -113,5 +115,50 @@ func TestReadValueRefusesMoreThanAVariableHolds(t *testing.T) {
 
 	if len(got) != maxVariable {
 		t.Errorf("readValue() read %d bytes, want %d", len(got), maxVariable)
+	}
+}
+
+// Nothing behind is an answer, not a failure: a script that applies after
+// every change must not fail on the run where a deploy got there first.
+func TestApplyWithNothingBehindSaysSo(t *testing.T) {
+	env, out, errOut := followEnv(t)
+
+	reportApplied(env, &api.VariablesApplied{})
+
+	if !strings.Contains(out.String()+errOut.String(), "Nothing to apply") {
+		t.Errorf("output = %q, want it to say there was nothing to apply", out.String()+errOut.String())
+	}
+}
+
+// Each environment is named, and one that could not be reached is told apart
+// from one that is restarting.
+func TestApplyNamesEachEnvironment(t *testing.T) {
+	env, out, errOut := followEnv(t)
+
+	reportApplied(env, &api.VariablesApplied{
+		Applied:     []string{"acme-staging"},
+		Unreachable: []string{"acme-production"},
+	})
+
+	all := out.String() + errOut.String()
+
+	if !strings.Contains(all, "acme-staging is restarting") {
+		t.Errorf("output = %q, want the applied environment named", all)
+	}
+
+	if !strings.Contains(all, "acme-production could not be reached") {
+		t.Errorf("output = %q, want the unreachable environment named", all)
+	}
+}
+
+// The hint after a write has to name the scope the write was made in, or it
+// sends somebody who set a project variable to apply one environment.
+func TestApplyHintFollowsTheScope(t *testing.T) {
+	if got := applyHint(scopeProject); got != " --scope project" {
+		t.Errorf("applyHint(project) = %q", got)
+	}
+
+	if got := applyHint(scopeEnvironment); got != "" {
+		t.Errorf("applyHint(environment) = %q, want nothing", got)
 	}
 }
