@@ -162,6 +162,61 @@ type SSHTarget struct {
 	// one the command is correct and still refused, and the fix is on their
 	// profile rather than in what they typed.
 	HasKeys bool `json:"has_keys"`
+
+	// WritablePaths is every area under the environment's shared root: the
+	// public files directory, the private one, and whatever the deployed
+	// release's vallic.yaml asked to keep. Empty against a control plane that
+	// predates the field, which is why FilesPath is still read on its own
+	// rather than looked up in here.
+	WritablePaths []WritablePath `json:"writable_paths"`
+}
+
+// WritablePath is one place on the far side that survives a deploy.
+type WritablePath struct {
+	// Name is what the platform calls it and what a person passes to --area:
+	// "public", "private", or "mounts/<name>" for one the application declared.
+	// One vocabulary for the wire, the disk and the command line.
+	Name string `json:"name"`
+
+	// Path is the absolute path inside the container.
+	Path string `json:"path"`
+
+	// Kind is "public", "private" or "shared". Sent rather than inferred from
+	// the name's prefix, so a client grouping these does not parse a path to
+	// learn which ones the application asked for.
+	Kind string `json:"kind"`
+}
+
+// WritablePathNames is what --area accepts, in the order it was sent.
+func (t *SSHTarget) WritablePathNames() []string {
+	names := make([]string, 0, len(t.WritablePaths))
+
+	for i := range t.WritablePaths {
+		names = append(names, t.WritablePaths[i].Name)
+	}
+
+	return names
+}
+
+// WritablePathFor resolves an area name to its path.
+//
+// Falls back to FilesPath for "public" alone, and only where the control plane
+// sent no list at all: that is an older control plane, where public is the one
+// area a client could ever reach and the field it came from is still there.
+// Every other name against such a control plane is a real "no", because
+// offering a path this cannot know would be offering an rsync that fails.
+func (t *SSHTarget) WritablePathFor(name string) (string, bool) {
+	for i := range t.WritablePaths {
+		if t.WritablePaths[i].Name == name {
+			return t.WritablePaths[i].Path, true
+		}
+	}
+
+	if len(t.WritablePaths) == 0 && name == "public" {
+		return t.FilesPath, true
+	}
+
+	return "", false
 }
 
 // Server is one machine.

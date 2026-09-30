@@ -81,3 +81,40 @@ func TestTheBuildOutputNamesTheReleaseByItsNumber(t *testing.T) {
 		t.Errorf("got %q, want the id said to be an id", bare)
 	}
 }
+
+// Shipping to a protected environment is confirmed, and only then.
+//
+// `build --deploy` skipped this until [2026-09-30] while `vallic deploy` made
+// it, which turned the flag into a way round a question the other path asks --
+// on an environment marked protected precisely so that shipping to it is a
+// deliberate act.
+func TestOnlyABuildThatShipsToAProtectedEnvironmentIsConfirmed(t *testing.T) {
+	for _, tc := range []struct {
+		name                           string
+		deploy, protected, interactive bool
+		want                           bool
+	}{
+		{"shipping to a protected environment at a terminal", true, true, true, true},
+
+		// A build that deploys nothing cannot reach the live site, so there is
+		// nothing to be careful about however protected the environment is.
+		{"building only, however protected", false, true, true, false},
+
+		// Protection guards reshaping rather than operating. A prompt on every
+		// staging deploy is a prompt nobody reads by the third one.
+		{"shipping to an unprotected environment", true, false, true, false},
+
+		// A pipeline has nobody to answer. Blocking there would hang a build
+		// rather than refuse it.
+		{"no terminal to ask at", true, true, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := asksBeforeShipping(tc.deploy, tc.protected, tc.interactive)
+
+			if got != tc.want {
+				t.Errorf("asksBeforeShipping(%v, %v, %v) = %v, want %v",
+					tc.deploy, tc.protected, tc.interactive, got, tc.want)
+			}
+		})
+	}
+}

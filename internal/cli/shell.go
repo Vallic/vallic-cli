@@ -5,7 +5,10 @@ import (
 	"flag"
 	"fmt"
 	"os/exec"
+	"strings"
 
+	"github.com/vallic/vallic-cli/internal/api"
+	"github.com/vallic/vallic-cli/internal/output"
 	vssh "github.com/vallic/vallic-cli/internal/ssh"
 )
 
@@ -286,10 +289,12 @@ func mountCommand() *Command {
 	var identity string
 	var dryRun bool
 	var delete_ bool
+	var area string
 
 	flags := func(fs *flag.FlagSet) {
 		identityFlag(fs, &identity)
 		fs.BoolVar(&dryRun, "dry-run", false, "print the rsync command instead of running it")
+		fs.StringVar(&area, "area", "public", "which writable area: public, private, or mounts/<name>")
 	}
 
 	return &Command{
@@ -299,14 +304,26 @@ func mountCommand() *Command {
 		Long: `rsync, so a transfer resumes rather than restarting and tens of
 thousands of small files are copied incrementally.
 
-Aimed at the environment's shared writable directory, which is the same path
-for every project type and survives every deploy. The release itself is
-mounted read only, so a path inside the code is a transfer that fails.`,
+Aimed at a directory that survives a deploy. The release itself is mounted read
+only, so a path inside the code is a transfer that fails.
+
+--area chooses which one. There are three kinds:
+
+    public              served to the internet
+    private             written by the application, never served
+    mounts/<name>       a directory vallic.yaml asked to keep
+
+` + "`vallic mount list`" + ` prints what this environment actually has, and its
+NAME column is exactly what --area takes.
+
+The mounts are the deployed release's, not your working tree's: a directory
+exists because a deploy made it, so one added to vallic.yaml and not yet
+deployed is a path rsync would fail on.`,
 		Children: []*Command{
 			{
-				Name:    "path",
-				Summary: "print the writable path on the far side",
-				Usage:   "mount path [<env>]",
+				Name:    "list",
+				Summary: "list the writable areas this environment has",
+				Usage:   "mount list [<env>]",
 				Flags:   flags,
 				Run: func(ctx context.Context, env *Env, args []string) error {
 					target, err := env.sshTarget(ctx, first(args), identity)
@@ -314,7 +331,49 @@ mounted read only, so a path inside the code is a transfer that fails.`,
 						return err
 					}
 
-					env.Printer.Line("%s", target.FilesPath)
+					areas := target.WritablePaths
+
+					// An older control plane sends none. Said as what it is,
+					// rather than printing an empty table that reads as "this
+					// environment has nowhere to write".
+					if len(areas) == 0 {
+						env.Printer.Say("This control plane lists no areas; only the public one can be reached.")
+						areas = []api.WritablePath{{Name: "public", Path: target.FilesPath, Kind: "public"}}
+					}
+
+					table := output.Table{
+						Columns: []string{"name", "kind", "path"},
+						Empty:   "This environment has no writable areas.",
+					}
+
+					for i := range areas {
+						table.Rows = append(table.Rows, []string{areas[i].Name, areas[i].Kind, areas[i].Path})
+					}
+
+					if env.Printer.Structured() {
+						return env.Printer.Value(map[string]any{"writable_paths": areas})
+					}
+
+					return env.Printer.Print(table, nil)
+				},
+			},
+			{
+				Name:    "path",
+				Summary: "print the writable path on the far side",
+				Usage:   "mount path [<env>] [--area <name>]",
+				Flags:   flags,
+				Run: func(ctx context.Context, env *Env, args []string) error {
+					target, err := env.sshTarget(ctx, first(args), identity)
+					if err != nil {
+						return err
+					}
+
+					path, err := resolveArea(&target.SSHTarget, area)
+					if err != nil {
+						return err
+					}
+
+					env.Printer.Line("%s", path)
 
 					return nil
 				},
@@ -322,7 +381,7 @@ mounted read only, so a path inside the code is a transfer that fails.`,
 			{
 				Name:    "download",
 				Summary: "copy files down, into a local directory",
-				Usage:   "mount download [<env>] <local-dir>",
+				Usage:   "mount download [<env>] <local-dir> [--area <name>]",
 				Flags:   flags,
 				Run: func(ctx context.Context, env *Env, args []string) error {
 					positional, local, err := splitMountArgs(args)
@@ -335,11 +394,16 @@ mounted read only, so a path inside the code is a transfer that fails.`,
 						return err
 					}
 
+					remote, err := resolveArea(&target.SSHTarget, area)
+					if err != nil {
+						return err
+					}
+
 					// Trailing slashes on both sides, which is what makes
 					// rsync copy the *contents* rather than nesting the
 					// directory inside itself. The single most common rsync
 					// mistake, and one the CLI can simply not make.
-					source := target.Remote(withSlash(target.FilesPath))
+					source := target.Remote(withSlash(remote))
 
 					return runOrPrint(env, target.Rsync(source, withSlash(local), nil), dryRun)
 				},
@@ -347,7 +411,7 @@ mounted read only, so a path inside the code is a transfer that fails.`,
 			{
 				Name:    "upload",
 				Summary: "copy files up, from a local directory",
-				Usage:   "mount upload [<env>] <local-dir>",
+				Usage:   "mount upload [<env>] <local-dir> [--area <name>]",
 				Flags: func(fs *flag.FlagSet) {
 					flags(fs)
 					fs.BoolVar(&delete_, "delete", false, "remove files on the far side that are not local")
@@ -363,14 +427,22 @@ mounted read only, so a path inside the code is a transfer that fails.`,
 						return err
 					}
 
+					remote, err := resolveArea(&target.SSHTarget, area)
+					if err != nil {
+						return err
+					}
+
 					var extra []string
 					if delete_ {
 						// Confirmed, because --delete against a live site's
 						// files directory is the one flag here that destroys
-						// something no deploy puts back.
+						// something no deploy puts back. The area is named in
+						// the question: "under /mnt/files/private" and "under
+						// /mnt/files/public" are very different sentences to
+						// agree to.
 						if !env.confirm(fmt.Sprintf(
 							"--delete will remove files under %s on %s that are not in %s. Continue?",
-							target.FilesPath, target.Host, local,
+							remote, target.Host, local,
 						)) {
 							return fmt.Errorf("cancelled")
 						}
@@ -378,7 +450,7 @@ mounted read only, so a path inside the code is a transfer that fails.`,
 						extra = append(extra, "--delete")
 					}
 
-					destination := target.Remote(withSlash(target.FilesPath))
+					destination := target.Remote(withSlash(remote))
 
 					return runOrPrint(env, target.Rsync(withSlash(local), destination, extra), dryRun)
 				},
@@ -488,4 +560,47 @@ func asExitError(err error, target **exec.ExitError) bool {
 	}
 
 	return false
+}
+
+// resolveArea turns an --area name into the path on the far side.
+//
+// Refused rather than guessed. A name this cannot resolve is either a typo or a
+// mount that has not been deployed yet, and both produce the same thing if the
+// path is assembled optimistically: an rsync against a directory that is not
+// there, which fails with rsync's own message about a protocol error rather
+// than with the one sentence that would have helped.
+//
+// The refusal lists what this environment does have, because the answer is
+// almost always one of them spelled differently -- `uploads` for
+// `mounts/uploads` most of all.
+func resolveArea(target *api.SSHTarget, area string) (string, error) {
+	area = strings.TrimSuffix(strings.TrimSpace(area), "/")
+
+	if area == "" {
+		area = "public"
+	}
+
+	if path, ok := target.WritablePathFor(area); ok {
+		return path, nil
+	}
+
+	available := target.WritablePathNames()
+
+	if len(available) == 0 {
+		return "", fmt.Errorf(
+			"this control plane does not say which areas exist, so only --area public can be used",
+		)
+	}
+
+	// The common near-miss: a declared mount named without its prefix. Worth
+	// its own sentence, because "uploads is not an area, try mounts/uploads"
+	// is a different thing to read than a list.
+	if _, ok := target.WritablePathFor("mounts/" + area); ok {
+		return "", fmt.Errorf("no area called %q; the mount is spelled mounts/%s", area, area)
+	}
+
+	return "", fmt.Errorf(
+		"no area called %q here\n  this environment has: %s\n  `vallic mount list` shows them with their paths",
+		area, strings.Join(available, ", "),
+	)
 }

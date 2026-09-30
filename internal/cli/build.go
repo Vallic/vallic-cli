@@ -57,6 +57,30 @@ set. The output says which it is going to be.`,
 				return err
 			}
 
+			// Only where this is going to ship something. A build that deploys
+			// nothing touches nothing on the live site, and an extra request
+			// per build to ask a question that cannot apply is a slower command
+			// for no gain.
+			if deploy {
+				detail, err := env.Detail(ctx, target)
+				if err != nil {
+					return err
+				}
+
+				// The same guard `vallic deploy` makes, and it belongs here for
+				// the same reason: protection guards reshaping an environment
+				// rather than operating one, so a developer shipping production
+				// is doing their job — but a command run from the wrong
+				// checkout should be recoverable before it happens rather than
+				// after. `build --deploy` skipped it until [2026-09-30], which
+				// made the flag a way round a question the other path asks.
+				if asksBeforeShipping(deploy, detail.Protected, env.Interactive()) {
+					if !env.confirm(fmt.Sprintf("Build and deploy to %s, which is protected?", detail.Name)) {
+						return fmt.Errorf("cancelled")
+					}
+				}
+			}
+
 			built, err := client.Build(ctx, target.Environment.ID, deploy)
 			if err != nil {
 				return describeBuildFailure(err)
@@ -128,4 +152,17 @@ func describeBuildFailure(err error) error {
 	}
 
 	return err
+}
+
+// asksBeforeShipping reports whether this build has to be confirmed first.
+//
+// All three, and each for its own reason. Only a build that deploys can reach a
+// live site, so one that produces a release and stops needs no question however
+// protected the environment is. Only a protected environment asks at all --
+// protection guards reshaping an environment rather than operating one, and a
+// prompt on every staging deploy is a prompt nobody reads. And only at a
+// terminal, because a pipeline has nobody to answer and a command that blocked
+// there would hang a build rather than refuse it.
+func asksBeforeShipping(deploy, protected, interactive bool) bool {
+	return deploy && protected && interactive
 }
