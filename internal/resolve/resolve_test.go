@@ -3,6 +3,7 @@ package resolve
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -248,4 +249,91 @@ func (f *fakeClient) Projects(context.Context) ([]api.Project, error) {
 
 func (f *fakeClient) Environments(context.Context) ([]api.Environment, error) {
 	return f.environments, nil
+}
+
+// A project is offered by its label as well as its machine name.
+//
+// The name alone is what this printed, and a machine name is generated:
+// `brogxu30`, `egmcbg18`. A list of five of them asks somebody to pick their own
+// project out of five strings that mean nothing, when the label they gave it is
+// on the same response the candidates were built from.
+func TestProjectCandidatesCarryTheirLabels(t *testing.T) {
+	got := projectNames([]api.Project{
+		{MachineName: "brogxu30", Label: "Auctioneer"},
+		{MachineName: "egmcbg18", Label: "Forum.tm"},
+	})
+
+	want := []string{"brogxu30 (Auctioneer)", "egmcbg18 (Forum.tm)"}
+
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("projectNames = %v, want %v", got, want)
+	}
+}
+
+// Sorted by label, which is what the eye scans and the order `project list`
+// prints. The name still leads each entry, because the name is what to type.
+func TestProjectCandidatesAreSortedByLabel(t *testing.T) {
+	got := projectNames([]api.Project{
+		{MachineName: "aaa00000", Label: "Zebra"},
+		{MachineName: "zzz99999", Label: "Apple"},
+	})
+
+	if got[0] != "zzz99999 (Apple)" {
+		t.Errorf("first = %q, want the project labelled Apple", got[0])
+	}
+}
+
+// A project with no label, or one labelled the same as its name, is printed
+// once. `acme (acme)` is noise, and an empty parenthesis is worse.
+func TestAProjectWithNothingToAddIsPrintedOnce(t *testing.T) {
+	got := projectNames([]api.Project{
+		{MachineName: "acme", Label: "acme"},
+		{MachineName: "bare", Label: ""},
+		{MachineName: "spaced", Label: "   "},
+	})
+
+	for _, name := range got {
+		if strings.Contains(name, "(") {
+			t.Errorf("got %q, want no parenthetical where there is nothing to say", name)
+		}
+	}
+}
+
+// Past a handful the list goes one per line, and past a page it is capped.
+//
+// A wall of candidates is where somebody stops looking for their own project
+// and reaches for --project with a guess, so the long case points at the
+// command that lists them properly instead of printing more.
+func TestALongCandidateListIsCappedAndPointsAtTheListing(t *testing.T) {
+	many := make([]string, 0, 20)
+	for i := 0; i < 20; i++ {
+		many = append(many, fmt.Sprintf("proj%02d", i))
+	}
+
+	message := (&Ambiguous{What: "project", Candidates: many, Because: "why"}).Error()
+
+	if !strings.Contains(message, "and 8 more") {
+		t.Errorf("message = %q, want it to say how many were left out", message)
+	}
+
+	if !strings.Contains(message, "vallic project list") {
+		t.Errorf("message = %q, want it to name the command that shows them all", message)
+	}
+
+	if strings.Contains(message, "proj19") {
+		t.Errorf("message = %q, want the tail left out rather than printed", message)
+	}
+}
+
+// A short list stays on one line, because two environments do not need a block.
+func TestAShortCandidateListStaysInline(t *testing.T) {
+	message := (&Ambiguous{
+		What:       "environment",
+		Candidates: []string{"production", "staging"},
+		Because:    "the branch matches none",
+	}).Error()
+
+	if !strings.Contains(message, "try one of: production, staging") {
+		t.Errorf("message = %q, want the two on one line", message)
+	}
 }

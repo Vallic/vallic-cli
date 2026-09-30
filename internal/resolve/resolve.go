@@ -61,7 +61,18 @@ func (e *Ambiguous) Error() string {
 	fmt.Fprintf(&b, "cannot tell which %s you mean: %s", e.What, e.Because)
 
 	if len(e.Candidates) > 0 {
-		fmt.Fprintf(&b, "\n  try one of: %s", strings.Join(e.Candidates, ", "))
+		// One per line past a handful. Five names read fine on one line; twenty
+		// read as a wall, and a wall is where somebody stops looking for their
+		// own project and reaches for --project with a guess.
+		if len(e.Candidates) > inlineCandidates {
+			fmt.Fprintf(&b, "\n  try one of:\n    %s", strings.Join(e.shown(), "\n    "))
+		} else {
+			fmt.Fprintf(&b, "\n  try one of: %s", strings.Join(e.shown(), ", "))
+		}
+
+		if hidden := len(e.Candidates) - len(e.shown()); hidden > 0 {
+			fmt.Fprintf(&b, "\n    and %d more — `vallic %s list` shows them all", hidden, e.What)
+		}
 	}
 
 	fmt.Fprintf(&b, "\n  or name it: --%s <name>", e.What)
@@ -74,6 +85,31 @@ func (e *Ambiguous) Error() string {
 	}
 
 	return b.String()
+}
+
+// How many candidates fit on one line, and how many are worth printing at all.
+//
+// Three inline because a project now carries its label, so each entry is long:
+// five of them is a hundred and twenty characters, which wraps into a paragraph
+// on an eighty-column terminal and stops being a list. Environments are short
+// and there are rarely more than three, so `production, staging` stays on the
+// line where it belongs.
+//
+// Twelve in total because past that the list stops being a choice and becomes a
+// page, and the useful thing is then the command that lists them properly
+// rather than a longer error.
+const (
+	inlineCandidates = 3
+	maxCandidates    = 12
+)
+
+// shown is the candidates this prints, capped.
+func (e *Ambiguous) shown() []string {
+	if len(e.Candidates) <= maxCandidates {
+		return e.Candidates
+	}
+
+	return e.Candidates[:maxCandidates]
 }
 
 // Resolver turns flags plus a checkout into a project and an environment.
@@ -357,14 +393,54 @@ func git(dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// projectNames is the candidate list, each name with the label beside it.
+//
+// The name alone is what this printed and it is not enough to choose from. A
+// machine name is generated — `brogxu30`, `egmcbg18` — so a list of five of
+// them asks somebody to pick their own project out of five strings that mean
+// nothing, and the answer is on the same response: the label they gave it.
+//
+// Sorted by label rather than by name, because the label is what the eye scans
+// and because that is the order `vallic project list` prints. The name still
+// comes first on each line: it is the thing to type.
 func projectNames(projects []api.Project) []string {
-	names := make([]string, 0, len(projects))
-	for _, p := range projects {
-		names = append(names, p.MachineName)
+	sorted := make([]api.Project, len(projects))
+	copy(sorted, projects)
+
+	sort.Slice(sorted, func(i, j int) bool {
+		if left, right := labelOf(sorted[i]), labelOf(sorted[j]); left != right {
+			return left < right
+		}
+
+		return sorted[i].MachineName < sorted[j].MachineName
+	})
+
+	names := make([]string, 0, len(sorted))
+
+	for _, p := range sorted {
+		label := strings.TrimSpace(p.Label)
+
+		// Nothing to add where there is no label, or where somebody named the
+		// project the same as its machine name: `acme (acme)` is noise.
+		if label == "" || label == p.MachineName {
+			names = append(names, p.MachineName)
+
+			continue
+		}
+
+		names = append(names, fmt.Sprintf("%s (%s)", p.MachineName, label))
 	}
-	sort.Strings(names)
 
 	return names
+}
+
+// labelOf is a project's label, falling back to its name for sorting.
+func labelOf(p api.Project) string {
+	if label := strings.TrimSpace(p.Label); label != "" {
+		return strings.ToLower(label)
+	}
+
+	return strings.ToLower(p.MachineName)
 }
 
 func environmentNames(environments []api.Environment) []string {
