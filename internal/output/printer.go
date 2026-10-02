@@ -149,7 +149,7 @@ func (p *Printer) Value(data any) error {
 // info --format table` on one field. It goes to stdout because it is the
 // result, and the result is what a `$(…)` captures.
 func (p *Printer) Line(format string, args ...any) {
-	fmt.Fprintf(p.out, format+"\n", args...)
+	fmt.Fprintln(p.out, Clean(fmt.Sprintf(format, args...)))
 }
 
 // Say writes a conversational line to stderr.
@@ -158,13 +158,13 @@ func (p *Printer) Say(format string, args ...any) {
 		return
 	}
 
-	fmt.Fprintf(p.err, format+"\n", args...)
+	fmt.Fprintln(p.err, Clean(fmt.Sprintf(format, args...)))
 }
 
 // Warn writes a warning to stderr. Not suppressed by --quiet: something the
 // person should know is not something they asked to hide.
 func (p *Printer) Warn(format string, args ...any) {
-	fmt.Fprintf(p.err, p.paint("33", "! ")+format+"\n", args...)
+	fmt.Fprintln(p.err, p.paint("33", "! ")+Clean(fmt.Sprintf(format, args...)))
 }
 
 // Good writes a success line to stderr.
@@ -173,7 +173,7 @@ func (p *Printer) Good(format string, args ...any) {
 		return
 	}
 
-	fmt.Fprintf(p.err, p.paint("32", "✓ ")+format+"\n", args...)
+	fmt.Fprintln(p.err, p.paint("32", "✓ ")+Clean(fmt.Sprintf(format, args...)))
 }
 
 // paint wraps text in an ANSI colour, or does not.
@@ -201,7 +201,7 @@ func (p *Printer) table(t Table) error {
 	}
 
 	for _, row := range t.Rows {
-		fmt.Fprintln(w, strings.Join(row, "\t"))
+		fmt.Fprintln(w, strings.Join(cells(row), "\t"))
 	}
 
 	return w.Flush()
@@ -401,4 +401,15 @@ func colourAllowed(w io.Writer) bool {
 	}
 
 	return terminal.IsTerminal(file)
+}
+
+// cells makes a row's values safe for the table: Clean, and on one line. A
+// tab or a newline inside a value would break the columns, and a value is
+// somebody else's text — a name, a branch, a message.
+func cells(row []string) []string {
+	out := make([]string, len(row))
+	for i, cell := range row {
+		out[i] = strings.NewReplacer("\t", " ", "\n", " ", "\r", " ").Replace(Clean(cell))
+	}
+	return out
 }

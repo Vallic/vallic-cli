@@ -358,7 +358,9 @@ func (e *Env) follow(ctx context.Context, client *api.Client, id int, out io.Wri
 		}
 
 		if log.Content != "" {
-			if _, writeErr := io.WriteString(out, log.Content); writeErr != nil {
+			// Cleaned: a build log is other people's text, and a terminal acts
+			// on the escape sequences in it. See output.Clean.
+			if _, writeErr := io.WriteString(out, output.Clean(log.Content)); writeErr != nil {
 				return state, writeErr
 			}
 		}
@@ -606,7 +608,7 @@ the control plane says which of those it is.`,
 					return err
 				}
 
-				if _, err := io.WriteString(env.Out, log.Content); err != nil {
+				if _, err := io.WriteString(env.Out, output.Clean(log.Content)); err != nil {
 					return err
 				}
 

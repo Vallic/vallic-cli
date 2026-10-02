@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/vallic/vallic-cli/internal/output"
 	"strings"
 
 	"github.com/vallic/vallic-cli/internal/api"
@@ -99,7 +100,7 @@ func (e *Env) confirm(question string) bool {
 		return false
 	}
 
-	fmt.Fprintf(e.Err, "%s [y/N] ", question)
+	fmt.Fprintf(e.Err, "%s [y/N] ", output.Clean(question))
 
 	line, err := bufio.NewReader(e.In).ReadString('\n')
 	if err != nil {
@@ -203,7 +204,8 @@ func Report(env *Env, root *Command, err error) int {
 		return code
 	}
 
-	fmt.Fprintf(env.Err, "vallic: %s\n", err)
+	// The server's own words are often in it.
+	fmt.Fprintf(env.Err, "vallic: %s\n", output.Clean(err.Error()))
 
 	var usage *UsageError
 	if errors.As(err, &usage) {
