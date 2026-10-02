@@ -25,6 +25,9 @@ vallic@acme-webshop-16-production:/var/www/html$ drush status
 $ vallic db export > dump.sql
 $ gunzip -c dump.sql.gz | vallic db import staging
 $ vallic mount download ./files
+
+$ vallic tunnel staging db
+✓ db is on 127.0.0.1:3306. Ctrl-C closes it.
 ```
 
 ## Installing

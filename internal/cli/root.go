@@ -82,6 +82,7 @@ to production.`,
 			drushCommand(),
 			dbCommand(),
 			sqlCommand(),
+			tunnelCommand(),
 			mountCommand(),
 		},
 	}

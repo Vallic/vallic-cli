@@ -254,10 +254,9 @@ func sqlCommand() *Command {
 		Usage:   "sql [<env>]",
 		Long: `A prompt inside the container, not a local port.
 
-sshd on a managed machine refuses forwarding outright, deliberately — so
-there is no tunnel to a tenant's database and this is not one. What you get is
-the engine's own client, running beside the site, reading its credentials from
-the container's environment.`,
+What you get is the engine's own client, running beside the site, reading its
+credentials from the container's environment. For a desktop client on a local
+port instead, see vallic tunnel.`,
 		Flags: func(fs *flag.FlagSet) {
 			identityFlag(fs, &identity)
 			fs.BoolVar(&dryRun, "dry-run", false, "print the ssh command instead of running it")
