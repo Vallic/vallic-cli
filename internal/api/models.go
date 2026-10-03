@@ -301,11 +301,14 @@ type TaskLog struct {
 type Release struct {
 	ID int `json:"id"`
 
-	// Number is the project's own sequence, claimed under a lock. It is what
-	// a person types into `--release` and what the `#` column prints; ids are
-	// global and would interleave wrongly after a backfill. The deploy route
-	// takes the id, so releaseIDFor turns one into the other.
+	// Number is the project's own sequence: every branch's builds in one
+	// count. Kept for scripts; a person is shown Numbers instead.
 	Number int `json:"number"`
+
+	// Numbers is each environment's own number for this release, by slug —
+	// what that environment's pages, its deploys and `--release` call it.
+	// An environment that has none for it is absent.
+	Numbers map[string]int `json:"numbers"`
 
 	Status string `json:"status"`
 
@@ -344,6 +347,9 @@ type Deployment struct {
 	// PreviousRelease is what this one replaces, so "rolled back to 46 from
 	// 47" needs no second request.
 	PreviousRelease *int `json:"previous_release"`
+
+	// SkipSteps says it goes live without the application's deploy steps.
+	SkipSteps bool `json:"skip_steps"`
 }
 
 // Describe says what happened, in the words the trigger calls for.

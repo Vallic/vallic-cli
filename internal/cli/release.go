@@ -4,6 +4,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/vallic/vallic-cli/internal/api"
@@ -30,9 +32,12 @@ func releaseListCommand() *Command {
 	return &Command{
 		Name:    "list",
 		Summary: "list builds, newest first",
-		Usage:   "release list [--limit <n>] [--branch <name>]",
-		Long: `Newest first, by the project's own release number — which is what
-` + "`--release`" + ` takes, and is not the same as the id.
+		Usage:   "release list [<env>] [--limit <n>] [--branch <name>]",
+		Long: `Newest first. Each environment numbers the releases made for it, so
+production's release 4 and staging's release 12 can be the same build. Name an
+environment to see its numbers in the ` + "`#`" + ` column — the numbers
+` + "`vallic deploy --release`" + ` takes for it. Without one, every
+environment's number is listed beside each build.
 
 ` + "`deployable`" + ` is the control plane's own answer, not a reading of the
 status: a build can be present and still refused, because its artifact has
@@ -54,13 +59,23 @@ different and much more alarming sentence.`,
 			fs.StringVar(&branch, "branch", "", "only builds from this branch (default: every branch)")
 		},
 		Run: func(ctx context.Context, env *Env, args []string) error {
-			if err := ensureNoExtra(nil, args, 0); err != nil {
+			if err := ensureNoExtra(nil, args, 1); err != nil {
 				return err
 			}
 
 			project, err := env.ResolveProject(ctx)
 			if err != nil {
 				return err
+			}
+
+			// An environment named: its numbers in the # column.
+			slug := ""
+			if len(args) == 1 {
+				target, err := env.ResolveEnvironment(ctx, args[0])
+				if err != nil {
+					return err
+				}
+				slug = target.Environment.Slug
 			}
 
 			client, err := env.Client()
@@ -81,8 +96,13 @@ different and much more alarming sentence.`,
 				empty = fmt.Sprintf("Nothing has been built from %q.", branch)
 			}
 
+			columns := []string{"#", "status", "branch", "commit", "message", "built", "live on"}
+			if slug == "" {
+				columns[0] = "numbers"
+			}
+
 			table := output.Table{
-				Columns: []string{"#", "status", "branch", "commit", "built", "live on"},
+				Columns: columns,
 				Empty:   empty,
 			}
 
@@ -95,10 +115,11 @@ different and much more alarming sentence.`,
 				}
 
 				table.Rows = append(table.Rows, []string{
-					fmt.Sprint(release.Number),
+					numberColumn(release, slug),
 					status,
 					release.GitRef,
 					shortSHA(release.GitSHA),
+					clip(release.GitMessage, 50),
 					ago(release.BuiltAt),
 					joinOrDash(release.DeployedTo),
 				})
@@ -140,7 +161,7 @@ release's artifact has since been pruned. Both answer ` + "`no_release`" + `.`,
 			fs.DurationVar(&timeout, "timeout", 30*time.Minute, "how long --wait waits")
 		},
 		Run: func(ctx context.Context, env *Env, args []string) error {
-			return env.putBack(ctx, first(args), wait, yes, timeout, "rollback")
+			return env.putBack(ctx, first(args), wait, yes, timeout, "rollback", false)
 		},
 	}
 }
@@ -148,19 +169,21 @@ release's artifact has since been pruned. Both answer ` + "`no_release`" + `.`,
 // redeployCommand runs the live build again.
 func redeployCommand() *Command {
 	var (
-		wait    bool
-		timeout time.Duration
-		yes     bool
+		wait      bool
+		timeout   time.Duration
+		yes       bool
+		skipSteps bool
 	)
 
 	return &Command{
 		Name:    "redeploy",
 		Summary: "deploy what is already live, again",
-		Usage:   "redeploy [<env>] [--wait]",
+		Usage:   "redeploy [<env>] [--skip-steps] [--wait]",
 		Long: `The same build, through the application's own deploy steps again,
 migrations included. So it is a change rather than a repetition, and worth
 meaning: it runs whatever the release's deploy steps do, against the data
-that is there now.
+that is there now. --skip-steps leaves the deploy steps out: the code and
+the reloads, nothing else.
 
 Not gated on confirming who you are. That was true of deploys and rollbacks
 until deploying stopped being gated at all, and this went with them: what a
@@ -173,9 +196,10 @@ than moving a pointer at code.`,
 			fs.BoolVar(&wait, "wait", false, "block until it finishes")
 			fs.BoolVar(&yes, "yes", false, "do not ask for confirmation")
 			fs.DurationVar(&timeout, "timeout", 30*time.Minute, "how long --wait waits")
+			fs.BoolVar(&skipSteps, "skip-steps", false, "run it again without the deploy steps")
 		},
 		Run: func(ctx context.Context, env *Env, args []string) error {
-			return env.putBack(ctx, first(args), wait, yes, timeout, "redeploy")
+			return env.putBack(ctx, first(args), wait, yes, timeout, "redeploy", skipSteps)
 		},
 	}
 }
@@ -192,6 +216,7 @@ func (e *Env) putBack(
 	yes bool,
 	timeout time.Duration,
 	kind string,
+	skipSteps bool,
 ) error {
 	target, err := e.ResolveEnvironment(ctx, positional)
 	if err != nil {
@@ -226,7 +251,7 @@ func (e *Env) putBack(
 	if kind == "rollback" {
 		deployment, err = client.Rollback(ctx, target.Environment.ID)
 	} else {
-		deployment, err = client.Redeploy(ctx, target.Environment.ID)
+		deployment, err = client.Redeploy(ctx, target.Environment.ID, skipSteps)
 	}
 
 	if err != nil {
@@ -238,6 +263,9 @@ func (e *Env) putBack(
 	}
 
 	e.Printer.Good("%s (deployment %d)", deployment.Describe(), deployment.ID)
+	if deployment.SkipSteps {
+		e.Printer.Say("The deploy steps from vallic.yaml will not run.")
+	}
 
 	if !wait {
 		if e.Printer.Structured() {
@@ -286,4 +314,42 @@ func joinOrDash(values []string) string {
 	}
 
 	return out
+}
+
+// numberColumn is what the first column says about a release: the named
+// environment's number, or every environment's when none was named.
+func numberColumn(release api.Release, slug string) string {
+	if slug != "" {
+		if number, ok := release.Numbers[slug]; ok {
+			return fmt.Sprint(number)
+		}
+		return "-"
+	}
+
+	if len(release.Numbers) == 0 {
+		return "-"
+	}
+
+	slugs := make([]string, 0, len(release.Numbers))
+	for name := range release.Numbers {
+		slugs = append(slugs, name)
+	}
+	sort.Strings(slugs)
+
+	parts := make([]string, 0, len(slugs))
+	for _, name := range slugs {
+		parts = append(parts, fmt.Sprintf("%s %d", name, release.Numbers[name]))
+	}
+
+	return strings.Join(parts, ", ")
+}
+
+// clip shortens a commit message for a table cell.
+func clip(text string, width int) string {
+	runes := []rune(text)
+	if len(runes) <= width {
+		return text
+	}
+
+	return string(runes[:width-1]) + "…"
 }

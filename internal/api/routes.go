@@ -164,12 +164,15 @@ func (c *Client) Releases(ctx context.Context, projectID int, limit int, branch 
 // deploy asks for the result to be deployed here when it finishes. Sent always
 // rather than only when true, because the control plane's default and this
 // one's are the same and a body that says which is a body that cannot drift.
-func (c *Client) Build(ctx context.Context, environmentID int, deploy bool) (*Build, error) {
+func (c *Client) Build(ctx context.Context, environmentID int, deploy bool, skipSteps bool) (*Build, error) {
 	var out struct {
 		Build Build `json:"build"`
 	}
 
 	body := map[string]any{"deploy": deploy}
+	if deploy && skipSteps {
+		body["skip_steps"] = true
+	}
 
 	if err := c.post(ctx, fmt.Sprintf("/environments/%d/build", environmentID), body, &out); err != nil {
 		return nil, err
@@ -180,21 +183,31 @@ func (c *Client) Build(ctx context.Context, environmentID int, deploy bool) (*Bu
 
 // Rollback puts the release the current one replaced back.
 func (c *Client) Rollback(ctx context.Context, environmentID int) (*Deployment, error) {
-	return c.queueDeployment(ctx, fmt.Sprintf("/environments/%d/rollback", environmentID))
+	return c.queueDeployment(ctx, fmt.Sprintf("/environments/%d/rollback", environmentID), nil)
 }
 
 // Redeploy deploys what is already live, again.
-func (c *Client) Redeploy(ctx context.Context, environmentID int) (*Deployment, error) {
-	return c.queueDeployment(ctx, fmt.Sprintf("/environments/%d/redeploy", environmentID))
+func (c *Client) Redeploy(ctx context.Context, environmentID int, skipSteps bool) (*Deployment, error) {
+	var body map[string]any
+	if skipSteps {
+		body = map[string]any{"skip_steps": true}
+	}
+
+	return c.queueDeployment(ctx, fmt.Sprintf("/environments/%d/redeploy", environmentID), body)
 }
 
 // queueDeployment posts to a route that answers with a queued deployment.
-func (c *Client) queueDeployment(ctx context.Context, path string) (*Deployment, error) {
+func (c *Client) queueDeployment(ctx context.Context, path string, body map[string]any) (*Deployment, error) {
 	var out struct {
 		Deployment Deployment `json:"deployment"`
 	}
 
-	if err := c.post(ctx, path, nil, &out); err != nil {
+	var payload any
+	if body != nil {
+		payload = body
+	}
+
+	if err := c.post(ctx, path, payload, &out); err != nil {
 		return nil, err
 	}
 
@@ -205,10 +218,13 @@ func (c *Client) queueDeployment(ctx context.Context, path string) (*Deployment,
 //
 // A zero release means "the newest one that is ready", which is what makes
 // this scriptable; naming one is what makes it repeatable.
-func (c *Client) Deploy(ctx context.Context, environmentID int, release int) (*Deployment, error) {
+func (c *Client) Deploy(ctx context.Context, environmentID int, release int, skipSteps bool) (*Deployment, error) {
 	body := map[string]any{}
 	if release > 0 {
 		body["release"] = release
+	}
+	if skipSteps {
+		body["skip_steps"] = true
 	}
 
 	var out struct {

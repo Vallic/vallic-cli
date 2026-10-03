@@ -21,12 +21,15 @@ import (
 // than a moment in time; resolving the branch on the builder would record a sha
 // nobody chose, minutes after the person who asked looked at what was on it.
 func buildCommand() *Command {
-	var deploy bool
+	var (
+		deploy    bool
+		skipSteps bool
+	)
 
 	return &Command{
 		Name:    "build",
 		Summary: "build what an environment's branch points at now",
-		Usage:   "build [<env>] [--deploy]",
+		Usage:   "build [<env>] [--deploy [--skip-steps]]",
 		Long: `Builds the current commit of the branch this environment tracks, and
 returns the release it opened. It does not wait: a build is minutes of a build
 machine, so follow it with ` + "`vallic activity list`" + ` or watch for the
@@ -45,6 +48,7 @@ what auto-deploy means, and this command is not a way around a rule the project
 set. The output says which it is going to be.`,
 		Flags: func(fs *flag.FlagSet) {
 			fs.BoolVar(&deploy, "deploy", false, "deploy the result here when the build finishes")
+			fs.BoolVar(&skipSteps, "skip-steps", false, "with --deploy: go live without running the deploy steps")
 		},
 		Run: func(ctx context.Context, env *Env, args []string) error {
 			target, err := env.ResolveEnvironment(ctx, first(args))
@@ -81,7 +85,7 @@ set. The output says which it is going to be.`,
 				}
 			}
 
-			built, err := client.Build(ctx, target.Environment.ID, deploy)
+			built, err := client.Build(ctx, target.Environment.ID, deploy, skipSteps)
 			if err != nil {
 				return describeBuildFailure(err)
 			}

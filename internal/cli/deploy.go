@@ -15,22 +15,27 @@ import (
 // deployCommand queues a deployment.
 func deployCommand() *Command {
 	var (
-		release int
-		wait    bool
-		timeout time.Duration
+		release   int
+		wait      bool
+		timeout   time.Duration
+		skipSteps bool
 	)
 
 	return &Command{
 		Name:    "deploy",
 		Summary: "deploy a release to an environment",
-		Usage:   "deploy [<env>] [--release <n>] [--wait]",
+		Usage:   "deploy [<env>] [--release <n>] [--skip-steps] [--wait]",
 		Long: `With no --release, deploys the newest release that is ready.
 Naming one is what makes a script repeatable.
 
---release takes the number in the ` + "`#`" + ` column of ` + "`vallic release list`" + `,
-which is the project's own sequence. That is deliberately not the id: ids are
-global across the platform, so the number beside a build is the only one that
-means anything to the person reading it.
+--skip-steps puts the release live without running the deploy steps from
+vallic.yaml: for a step that is failing, or before you import a database. An
+environment's first deploy onto a database skips them on its own.
+
+--release takes this environment's own number for a release: the ` + "`#`" + ` column
+of ` + "`vallic release list <env>`" + `, and what the environment's pages call it.
+Each environment counts the builds made for it, so production's release 4 and
+staging's release 12 can be the same build.
 
 The control plane decides whether a deployment may happen; this only asks. A
 deployment already in flight answers 409, which --wait treats as something to
@@ -45,6 +50,7 @@ the whole of the check.`,
 			fs.IntVar(&release, "release", 0, "the release number to deploy (default: the newest that is ready)")
 			fs.BoolVar(&wait, "wait", false, "block until the deployment finishes")
 			fs.DurationVar(&timeout, "timeout", 30*time.Minute, "how long --wait waits before giving up")
+			fs.BoolVar(&skipSteps, "skip-steps", false, "go live without running the deploy steps")
 		},
 		Run: func(ctx context.Context, env *Env, args []string) error {
 			target, err := env.ResolveEnvironment(ctx, first(args))
@@ -84,7 +90,7 @@ the whole of the check.`,
 			if wanted > 0 {
 				var named api.Release
 
-				wanted, named, err = releaseIDFor(ctx, client, target.Project.ID, release)
+				wanted, named, err = releaseIDFor(ctx, client, target.Project.ID, target.Environment.Slug, release)
 				if err != nil {
 					return err
 				}
@@ -98,7 +104,7 @@ the whole of the check.`,
 			// who you are, so there is no challenge for one to answer, and a
 			// retry that can never fire is a retry somebody later reasons
 			// about as though it can.
-			deployment, err := client.Deploy(ctx, target.Environment.ID, wanted)
+			deployment, err := client.Deploy(ctx, target.Environment.ID, wanted, skipSteps)
 			if err != nil {
 				return describeDeployFailure(err, detail)
 			}
@@ -117,6 +123,9 @@ the whole of the check.`,
 			}
 
 			env.Printer.Good("%s (deployment %d)", deployment.Describe(), deployment.ID)
+			if deployment.SkipSteps {
+				env.Printer.Say("The deploy steps from vallic.yaml will not run.")
+			}
 
 			if !wait {
 				if env.Printer.Structured() {
@@ -639,50 +648,53 @@ func atoi(s string) (int, error) {
 	return n, nil
 }
 
-// releaseIDFor turns the number a person was shown into the id the route takes.
+// releaseIDFor turns an environment's release number into the id the route takes.
 //
-// `release list` prints the project's own sequence, and the deploy route loads
-// by entity id, so sending one where the other is expected either refuses or —
-// where an id of that value happens to exist in the same project — deploys a
-// different build and reports success. One extra request buys the guarantee
-// that the number in the `#` column is the number that deploys.
-func releaseIDFor(ctx context.Context, client *api.Client, projectID int, number int) (int, api.Release, error) {
+// Each environment numbers the releases made for it, and the deploy route
+// loads by entity id, so the number is looked up in that environment's column
+// of the release list. One extra request buys the guarantee that "release 4"
+// is the build this environment calls release 4.
+func releaseIDFor(ctx context.Context, client *api.Client, projectID int, environment string, number int) (int, api.Release, error) {
 	// The route's own ceiling. A build older than this cannot be named by
 	// number, which is said plainly below rather than left as a bare refusal.
 	const window = 100
 
-	// Every branch, not the target environment's. A build from another branch
-	// is a legitimate thing to name -- see branchWarning -- so narrowing here
-	// would turn "that is unusual" into "no such release", which is false.
+	// Every branch, not the environment's. A build it has numbered can be the
+	// old branch's after the branch was changed.
 	releases, err := client.Releases(ctx, projectID, window, "")
 	if err != nil {
 		return 0, api.Release{}, err
 	}
 
+	newest := 0
 	for i := range releases {
-		if releases[i].Number == number {
+		own, ok := releases[i].Numbers[environment]
+		if !ok {
+			continue
+		}
+		if own == number {
 			return releases[i].ID, releases[i], nil
+		}
+		if own > newest {
+			newest = own
 		}
 	}
 
-	if len(releases) == 0 {
-		return 0, api.Release{}, fmt.Errorf("this project has no releases yet")
+	if newest == 0 {
+		return 0, api.Release{}, fmt.Errorf("%s has no numbered releases yet\n  `vallic release list %s` shows what has been built", environment, environment)
 	}
-
-	newest := releases[0].Number
-	oldest := releases[len(releases)-1].Number
 
 	if number > newest {
 		return 0, api.Release{}, fmt.Errorf(
-			"this project has no release %d; the newest is %d\n  `vallic release list` shows what has been built",
-			number, newest,
+			"%s has no release %d; its newest is %d\n  `vallic release list %s` shows what has been built",
+			environment, number, newest, environment,
 		)
 	}
 
 	return 0, api.Release{}, fmt.Errorf(
-		"release %d is older than the %d builds this can look through, which reach back to %d\n"+
-			"  `vallic release list --limit %d` shows them",
-		number, len(releases), oldest, window,
+		"%s's release %d is older than the %d builds this can look through\n"+
+			"  `vallic release list %s --limit %d` shows them",
+		environment, number, len(releases), environment, window,
 	)
 }
 
