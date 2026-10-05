@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 
 	"github.com/vallic/vallic-cli/internal/api"
@@ -47,6 +48,36 @@ func (t *Target) jumpTarget() string {
 	}
 
 	return t.JumpTo
+}
+
+// ChooseContainer sets the container to open, by its full name or by the
+// short one a person types: `queue-1` for `worker-queue-1`.
+//
+// A worker runs on the worker machine where the environment has one, so that
+// is where the login goes unless a machine was named: on the front the
+// container is not there to open.
+func (t *Target) ChooseContainer(name string) error {
+	if name == "" {
+		return nil
+	}
+	full := name
+	if len(t.Workers) > 0 && !slices.Contains(t.Workers, name) {
+		if !slices.Contains(t.Workers, "worker-"+name) {
+			return fmt.Errorf("no container called %q; this environment's workers are: %s", name, strings.Join(t.Workers, ", "))
+		}
+		full = "worker-" + name
+	}
+	t.Container = full
+
+	if t.Machine == "" && slices.Contains(t.Workers, full) {
+		for _, m := range t.Machines {
+			if m.Role == "worker" {
+				t.Machine = m.Name
+				break
+			}
+		}
+	}
+	return nil
 }
 
 // ChooseMachine sets the machine to log in to, if the environment has one by

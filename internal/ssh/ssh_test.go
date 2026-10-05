@@ -294,6 +294,40 @@ func TestRsyncQuotesTheHop(t *testing.T) {
 	}
 }
 
+// A worker is opened by its short name, on the worker machine, through the front.
+func TestContainerByShortNameGoesToTheWorkerMachine(t *testing.T) {
+	target := targetFor(2417)
+	target.Machines = []api.SSHMachine{{Name: "web", Role: "web"}, {Name: "worker", Role: "worker"}}
+	target.Workers = []string{"worker-queue-1", "worker-queue-2"}
+
+	if err := target.ChooseContainer("queue-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	run := target.Run([]string{"php", "-v"}, false)
+	if got := run.Args[len(run.Args)-1]; got != "@worker-queue-1 php -v" {
+		t.Errorf("run sends %q", got)
+	}
+	if got := run.Args[len(run.Args)-2]; got != "vc-acme@worker.acme-1-production.vallic.cloud" {
+		t.Errorf("destination = %q, want the worker machine", got)
+	}
+}
+
+// A machine named on the command line is kept, and a name that is no worker is refused.
+func TestContainerKeepsTheNamedMachineAndRefusesStrangers(t *testing.T) {
+	target := targetFor(2417)
+	target.Machines = []api.SSHMachine{{Name: "web", Role: "web"}, {Name: "worker", Role: "worker"}}
+	target.Workers = []string{"worker-queue-1"}
+	target.Machine = "web"
+
+	if err := target.ChooseContainer("worker-queue-1"); err != nil || target.Machine != "web" {
+		t.Fatalf("err %v, machine %q", err, target.Machine)
+	}
+	if err := target.ChooseContainer("mailer-1"); err == nil || !strings.Contains(err.Error(), "worker-queue-1") {
+		t.Errorf("err = %v, want the workers listed", err)
+	}
+}
+
 func targetFor(port int) *Target {
 	return &Target{SSHTarget: api.SSHTarget{
 		Host:      "acme-1-production.vallic.cloud",

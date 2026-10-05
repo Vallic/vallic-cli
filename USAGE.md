@@ -142,9 +142,10 @@ vallic env info production
 vallic ssh production --machine web-2
 vallic ssh production --machine worker
 
-# A worker's container rather than the site's
-vallic ssh production --container queue-1
-vallic ssh production --container queue-1 -- php artisan queue:failed
+# A worker's container rather than the site's, on the worker machine where
+# there is one. Workers are named worker-<name>-<n>; the short name works too
+vallic ssh production --container worker-queue-1
+vallic ssh production --container queue-2 -- php artisan queue:failed
 ```
 
 If ssh refuses a key you have registered, name it: an agent offers every key it

@@ -75,7 +75,8 @@ With -- it runs one command instead of opening a shell.
 An environment on several machines is reached through its front, which carries
 the connection on to the machine: --machine names one (` + "`vallic env info`" + ` lists
 them), and without it the login goes where the site runs. --container opens a
-worker's container instead of the application's:
+worker's container instead of the application's — on the worker machine where
+there is one — by its full name or the short one:
 
     vallic ssh production --machine web-2
     vallic ssh production --container queue-1 -- php artisan queue:failed`,
@@ -97,7 +98,9 @@ worker's container instead of the application's:
 		if err := target.ChooseMachine(machine); err != nil {
 			return err
 		}
-		target.Container = container
+		if err := target.ChooseContainer(container); err != nil {
+			return err
+		}
 
 		var process *exec.Cmd
 		if len(remote) > 0 {
