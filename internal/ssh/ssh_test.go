@@ -195,6 +195,51 @@ func TestNilTargetIsAnError(t *testing.T) {
 	}
 }
 
+// On a machine staging and development share, the environment's name goes
+// first in every command: without it the forced command cannot tell which
+// one is meant, and a second environment made every login ask.
+func TestNamedEnvironmentGoesFirstEverywhere(t *testing.T) {
+	target := targetFor(2591)
+	target.Name = "staging"
+
+	shell := target.Shell()
+	if got := shell.Args[len(shell.Args)-1]; got != "staging" {
+		t.Errorf("shell ends with %q, want the name", got)
+	}
+	if !contains(shell.Args, "-t") {
+		t.Errorf("shell = %v, want -t: the name is a command, and a command gets no terminal otherwise", shell.Args)
+	}
+
+	run := target.Run([]string{"drush", "status"}, false)
+	if got := run.Args[len(run.Args)-1]; got != "staging drush status" {
+		t.Errorf("run sends %q, want the name in front", got)
+	}
+
+	verb := target.Verb("db-export", false)
+	if got := verb.Args[len(verb.Args)-1]; got != "staging db-export" {
+		t.Errorf("verb sends %q, want the name in front", got)
+	}
+
+	rsync := target.Rsync("./files/", target.Remote("/mnt/files/public/"), nil)
+	if !contains(rsync.Args, "--rsync-path=staging rsync") {
+		t.Errorf("rsync = %v, want the name in --rsync-path", rsync.Args)
+	}
+}
+
+// Without a name nothing changes: production has the port to itself.
+func TestUnnamedEnvironmentSendsCommandsAsTheyAre(t *testing.T) {
+	target := targetFor(2591)
+
+	if got := target.Shell().Args; got[len(got)-1] != target.Destination() {
+		t.Errorf("shell = %v, want nothing after the destination", got)
+	}
+	for _, arg := range target.Rsync("a", "b", nil).Args {
+		if strings.HasPrefix(arg, "--rsync-path") {
+			t.Errorf("rsync carries %q without a name", arg)
+		}
+	}
+}
+
 func targetFor(port int) *Target {
 	return &Target{SSHTarget: api.SSHTarget{
 		Host:      "acme-1-production.vallic.cloud",

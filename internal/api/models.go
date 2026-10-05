@@ -145,6 +145,12 @@ type SSHTarget struct {
 	Port int    `json:"port"`
 	User string `json:"user"`
 
+	// Name is the environment's name where the machine and port carry
+	// several — staging and development share both — and empty where the
+	// port alone says which. It goes first in every command: the forced
+	// command reads it, takes it off, and runs the rest.
+	Name string `json:"name"`
+
 	// DBExport, DBImport and DBCLI are the verbs the forced command expands
 	// inside the container, or empty where the stack runs no database. Sent
 	// rather than assumed, so the CLI neither offers `db export` for an
