@@ -89,8 +89,23 @@ func (t *Target) options() []string {
 // exec <service> bash -l`, with a terminal.
 func (t *Target) Shell() *exec.Cmd {
 	args := append(t.options(), "-t", t.Destination())
+	if t.Name != "" {
+		// The name is a command to ssh, and the -t above is what still
+		// gives it a terminal.
+		args = append(args, t.Name)
+	}
 
 	return command("ssh", args...)
+}
+
+// named puts the environment's name in front of a remote command, where the
+// machine carries several.
+func (t *Target) named(remote string) string {
+	if t.Name == "" {
+		return remote
+	}
+
+	return t.Name + " " + remote
 }
 
 // Run is one command, inside the container.
@@ -112,7 +127,7 @@ func (t *Target) Run(command_ []string, tty bool) *exec.Cmd {
 		args = append(args, "-T")
 	}
 
-	args = append(args, t.Destination(), quoteAll(command_))
+	args = append(args, t.Destination(), t.named(quoteAll(command_)))
 
 	return command("ssh", args...)
 }
@@ -137,7 +152,7 @@ func (t *Target) Verb(verb string, tty bool) *exec.Cmd {
 		args = append(args, "-T")
 	}
 
-	args = append(args, t.Destination(), verb)
+	args = append(args, t.Destination(), t.named(verb))
 
 	return command("ssh", args...)
 }
@@ -153,6 +168,11 @@ func (t *Target) Rsync(source, destination string, extra []string) *exec.Cmd {
 		"-avz",
 		"--human-readable",
 		"-e", strings.Join(transport, " "),
+	}
+	if t.Name != "" {
+		// rsync starts `rsync --server …` on the far side; the name in front
+		// of it is what tells the forced command which environment.
+		args = append(args, "--rsync-path="+t.Name+" rsync")
 	}
 	args = append(args, extra...)
 	args = append(args, source, destination)
