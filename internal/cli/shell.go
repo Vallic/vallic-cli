@@ -51,8 +51,10 @@ func (e *Env) sshTarget(ctx context.Context, positional, identity string) (*vssh
 // sshCommand opens a shell, or runs one command.
 func sshCommand() *Command {
 	var (
-		identity string
-		dryRun   bool
+		identity  string
+		dryRun    bool
+		machine   string
+		container string
 	)
 
 	cmd := &Command{
@@ -68,10 +70,20 @@ Nothing runs on the host. The account on the far side has a forced command
 that hands what you asked for to a shell inside the container, and sshd
 refuses every kind of forwarding.
 
-With -- it runs one command instead of opening a shell.`,
+With -- it runs one command instead of opening a shell.
+
+An environment on several machines is reached through its front, which carries
+the connection on to the machine: --machine names one (` + "`vallic env info`" + ` lists
+them), and without it the login goes where the site runs. --container opens a
+worker's container instead of the application's:
+
+    vallic ssh production --machine web-2
+    vallic ssh production --container queue-1 -- php artisan queue:failed`,
 		Flags: func(fs *flag.FlagSet) {
 			identityFlag(fs, &identity)
 			fs.BoolVar(&dryRun, "dry-run", false, "print the ssh command instead of running it")
+			fs.StringVar(&machine, "machine", "", "which of the environment's machines to log in to")
+			fs.StringVar(&container, "container", "", "a container to open other than the application's, such as a worker")
 		},
 	}
 
@@ -82,6 +94,10 @@ With -- it runs one command instead of opening a shell.`,
 		if err != nil {
 			return err
 		}
+		if err := target.ChooseMachine(machine); err != nil {
+			return err
+		}
+		target.Container = container
 
 		var process *exec.Cmd
 		if len(remote) > 0 {

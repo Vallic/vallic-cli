@@ -134,6 +134,12 @@ type Hostnames struct {
 	URL string `json:"url"`
 }
 
+// SSHMachine is one machine of an environment, by the name `jump` takes.
+type SSHMachine struct {
+	Name string `json:"name"`
+	Role string `json:"role"`
+}
+
 // SSHTarget is where to point ssh, rsync and a database client.
 //
 // Every field is one a client must not derive. The port especially: it is
@@ -150,6 +156,16 @@ type SSHTarget struct {
 	// port alone says which. It goes first in every command: the forced
 	// command reads it, takes it off, and runs the rest.
 	Name string `json:"name"`
+
+	// Machines are the environment's machines a login can be carried on to
+	// from Host, by name; empty for an environment on one. JumpTo is the one
+	// a plain login goes to where Host runs no site — the dedicated shape's
+	// balancer, or Varnish on a machine of its own.
+	Machines []SSHMachine `json:"machines"`
+	JumpTo   string       `json:"jump_to"`
+
+	// Workers are the worker containers, by the name --container takes.
+	Workers []string `json:"workers"`
 
 	// DBExport, DBImport and DBCLI are the verbs the forced command expands
 	// inside the container, or empty where the stack runs no database. Sent

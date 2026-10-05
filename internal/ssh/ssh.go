@@ -30,6 +30,44 @@ type Target struct {
 	// Identity is a private key to offer, or empty for whatever ssh would
 	// have chosen. From --identity or VALLIC_SSH_KEY.
 	Identity string
+
+	// Machine is the machine to be carried on to from Host, by name; empty
+	// for JumpTo, or for Host itself where there is none.
+	Machine string
+
+	// Container is a container to open other than the application's: a
+	// worker, by name.
+	Container string
+}
+
+// jumpTarget is the machine a connection is carried on to, or empty.
+func (t *Target) jumpTarget() string {
+	if t.Machine != "" {
+		return t.Machine
+	}
+
+	return t.JumpTo
+}
+
+// ChooseMachine sets the machine to log in to, if the environment has one by
+// that name.
+func (t *Target) ChooseMachine(name string) error {
+	if name == "" {
+		return nil
+	}
+	names := make([]string, 0, len(t.Machines))
+	for _, m := range t.Machines {
+		if m.Name == name {
+			t.Machine = name
+			return nil
+		}
+		names = append(names, m.Name)
+	}
+	if len(names) == 0 {
+		return fmt.Errorf("this environment runs on one machine; there is no %q to choose", name)
+	}
+
+	return fmt.Errorf("no machine called %q; this environment has: %s", name, strings.Join(names, ", "))
 }
 
 // ErrNoShell is what a nil SSH target means.
@@ -63,12 +101,42 @@ func New(detail *api.EnvironmentDetail, identity string) (*Target, error) {
 }
 
 // Destination is the `user@host` ssh takes.
+//
+// Carried on to another machine, the host is that machine's label under the
+// environment's — `web-2.production.acme.vallic.cloud` — which nothing
+// resolves: ProxyCommand makes the connection, and the label is what keeps
+// one known_hosts entry per machine.
 func (t *Target) Destination() string {
+	if machine := t.jumpTarget(); machine != "" {
+		return t.User + "@" + machine + "." + t.Host
+	}
+
 	return t.User + "@" + t.Host
 }
 
 // options are the -o and -p arguments every invocation shares.
 func (t *Target) options() []string {
+	args := t.base()
+
+	// Through the environment's front, which carries the connection on to
+	// the machine over the private network: the machines behind it often
+	// have no public address, and the front may run no site of its own.
+	if machine := t.jumpTarget(); machine != "" {
+		hop := append([]string{"ssh"}, t.base()...)
+		hop = append(hop, t.User+"@"+t.Host)
+		if t.Name != "" {
+			hop = append(hop, t.Name)
+		}
+		hop = append(hop, "jump", machine)
+		args = append(args, "-o", "ProxyCommand="+strings.Join(hop, " "))
+	}
+
+	return args
+}
+
+// base is the port and the identity, which the hop to the front needs as
+// much as the login itself.
+func (t *Target) base() []string {
 	args := []string{"-p", fmt.Sprint(t.Port)}
 
 	if t.Identity != "" {
@@ -89,10 +157,10 @@ func (t *Target) options() []string {
 // exec <service> bash -l`, with a terminal.
 func (t *Target) Shell() *exec.Cmd {
 	args := append(t.options(), "-t", t.Destination())
-	if t.Name != "" {
+	if first := t.named(""); first != "" {
 		// The name is a command to ssh, and the -t above is what still
 		// gives it a terminal.
-		args = append(args, t.Name)
+		args = append(args, first)
 	}
 
 	return command("ssh", args...)
@@ -101,11 +169,19 @@ func (t *Target) Shell() *exec.Cmd {
 // named puts the environment's name in front of a remote command, where the
 // machine carries several.
 func (t *Target) named(remote string) string {
-	if t.Name == "" {
-		return remote
+	var words []string
+	if t.Name != "" {
+		words = append(words, t.Name)
+	}
+	if t.Container != "" {
+		// `@` marks it as a container, so it is never read as a command.
+		words = append(words, "@"+t.Container)
+	}
+	if remote != "" {
+		words = append(words, remote)
 	}
 
-	return t.Name + " " + remote
+	return strings.Join(words, " ")
 }
 
 // Run is one command, inside the container.
@@ -164,10 +240,12 @@ func (t *Target) Verb(verb string, tty bool) *exec.Cmd {
 func (t *Target) Rsync(source, destination string, extra []string) *exec.Cmd {
 	transport := append([]string{"ssh"}, t.options()...)
 
+	// Quoted, because rsync splits -e on spaces and honours quotes: a
+	// ProxyCommand is one argument with spaces in it.
 	args := []string{
 		"-avz",
 		"--human-readable",
-		"-e", strings.Join(transport, " "),
+		"-e", quoteAll(transport),
 	}
 	if t.Name != "" {
 		// rsync starts `rsync --server …` on the far side; the name in front

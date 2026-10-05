@@ -210,7 +210,8 @@ vallic ssh -i ~/.ssh/vallic        # or: export VALLIC_SSH_KEY=~/.ssh/vallic
 ## The commands
 
 `vallic <command> --help` has the detail, including why each one refuses what
-it refuses. Everything takes `[<env>]`, which is worked out from the checkout
+it refuses. [USAGE.md](USAGE.md) has worked examples for all of it, grouped by
+what you are trying to do. Everything takes `[<env>]`, which is worked out from the checkout
 when it is left off.
 
 | | |

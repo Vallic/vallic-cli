@@ -240,6 +240,60 @@ func TestUnnamedEnvironmentSendsCommandsAsTheyAre(t *testing.T) {
 	}
 }
 
+// Behind a balancer the login is carried on from the front to a web machine,
+// and the hop names the machine; the login's host is the machine's label.
+func TestJumpToIsTheDefaultBehindABalancer(t *testing.T) {
+	target := targetFor(2417)
+	target.JumpTo = "web-1"
+
+	shell := target.Shell()
+	if !contains(shell.Args, "ProxyCommand=ssh -p 2417 vc-acme@acme-1-production.vallic.cloud jump web-1") {
+		t.Errorf("shell = %v, want the hop through the front", shell.Args)
+	}
+	if got := shell.Args[len(shell.Args)-1]; got != "vc-acme@web-1.acme-1-production.vallic.cloud" {
+		t.Errorf("destination = %q, want the machine's label", got)
+	}
+}
+
+// --machine picks one the environment has, and says which it has otherwise.
+func TestMachineIsChosenFromTheEnvironments(t *testing.T) {
+	target := targetFor(2417)
+	target.Machines = []api.SSHMachine{{Name: "web-1", Role: "web"}, {Name: "web-2", Role: "web"}}
+
+	if err := target.ChooseMachine("web-2"); err != nil || target.Machine != "web-2" {
+		t.Fatalf("ChooseMachine = %v, machine %q", err, target.Machine)
+	}
+	err := target.ChooseMachine("db")
+	if err == nil || !strings.Contains(err.Error(), "web-1, web-2") {
+		t.Errorf("err = %v, want the machines listed", err)
+	}
+}
+
+// A container goes in front of the command, marked, after any name.
+func TestContainerIsMarkedInFrontOfTheCommand(t *testing.T) {
+	target := targetFor(2417)
+	target.Name = "staging"
+	target.Container = "queue-1"
+
+	run := target.Run([]string{"php", "artisan", "queue:failed"}, false)
+	if got := run.Args[len(run.Args)-1]; got != "staging @queue-1 php artisan queue:failed" {
+		t.Errorf("run sends %q", got)
+	}
+}
+
+// rsync splits -e on spaces, so the hop is quoted as one argument.
+func TestRsyncQuotesTheHop(t *testing.T) {
+	target := targetFor(2417)
+	target.JumpTo = "web-1"
+
+	rsync := target.Rsync("./files/", target.Remote("/mnt/files/public/"), nil)
+	for i, arg := range rsync.Args {
+		if arg == "-e" && !strings.Contains(rsync.Args[i+1], "'ProxyCommand=ssh -p 2417 vc-acme@acme-1-production.vallic.cloud jump web-1'") {
+			t.Errorf("-e %q, want the ProxyCommand quoted", rsync.Args[i+1])
+		}
+	}
+}
+
 func targetFor(port int) *Target {
 	return &Target{SSHTarget: api.SSHTarget{
 		Host:      "acme-1-production.vallic.cloud",
