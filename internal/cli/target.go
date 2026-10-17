@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"os"
 
 	"github.com/vallic/vallic-cli/internal/api"
@@ -14,12 +15,31 @@ type Target struct {
 	Environment *api.Environment
 }
 
+// Named is the target as a question about it should name it: the
+// environment's slug and the project's label, `acme-production (Acme)`.
+//
+// Not the environment's name. Every project has a "production", so a
+// question that said only that could not show somebody that the checkout
+// they ran it in resolved to another project's.
+func (t *Target) Named() string {
+	if t == nil || t.Environment == nil {
+		return "this environment"
+	}
+
+	if t.Project == nil || t.Project.Label == "" {
+		return t.Environment.Slug
+	}
+
+	return fmt.Sprintf("%s (%s)", t.Environment.Slug, t.Project.Label)
+}
+
 // Resolver builds a resolver from the configuration and the flags.
 //
 // The precedence is settled here, once, for both nouns: a flag beats the
-// environment, which beats the config file, and a checkout answers for
-// itself where none of them said anything. See internal/resolve for the two
-// rules that hold below that.
+// environment variable, and both beat the checkout. The project `vallic
+// link` recorded comes after the checkout, not before it — it is one answer
+// for every directory on the machine, and a checkout that names its own
+// project is the better one. See internal/resolve for the rules below that.
 func (e *Env) Resolver(client resolve.Client) (*resolve.Resolver, error) {
 	cfg, err := e.Config()
 	if err != nil {
@@ -37,7 +57,8 @@ func (e *Env) Resolver(client resolve.Client) (*resolve.Resolver, error) {
 	return &resolve.Resolver{
 		Client:          client,
 		Dir:             dir,
-		ProjectHint:     firstNonEmpty(e.flagProject, cfg.Project),
+		ProjectHint:     firstNonEmpty(e.flagProject, os.Getenv("VALLIC_PROJECT")),
+		ProjectRecorded: cfg.Project,
 		EnvironmentHint: firstNonEmpty(e.flagEnvironment, cfg.Environment),
 	}, nil
 }

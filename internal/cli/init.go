@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -25,6 +26,8 @@ const (
 	typePHP       = "php"
 	typeNode      = "nodejs"
 	typeGo        = "go"
+	typePython    = "python"
+	typeDjango    = "django"
 )
 
 // initCommand writes a starting vallic.yaml.
@@ -49,7 +52,7 @@ func initCommand() *Command {
 	return &Command{
 		Name:    "init",
 		Summary: "write a starting vallic.yaml for this checkout",
-		Usage:   "init [--type drupal|laravel|wordpress|php|nodejs|go] [--force]",
+		Usage:   "init [--type drupal|laravel|wordpress|php|nodejs|go|python|django] [--force]",
 		Long: `Writes vallic.yaml in the working directory, and nothing else. It
 needs no credential and reaches nothing, so it works in a checkout of a
 project that does not exist on the platform yet.
@@ -57,8 +60,10 @@ project that does not exist on the platform yet.
 What kind of project this is comes from the files here: a composer.json
 requiring drupal/core is Drupal, laravel/framework is Laravel, a WordPress
 core package or a wp-config.php is WordPress, a composer.json on its own is
-PHP, go.mod is Go, package.json is Node. The command says which file decided
-it, and --type overrides the answer.
+PHP, go.mod is Go, manage.py or a dependency on Django is Django, a uv.lock,
+pyproject.toml or requirements.txt is otherwise Python, and package.json is
+Node. The command says which file decided it, and --type overrides the
+answer.
 
 The kind is worth getting right rather than settling for the generic one: it
 decides the cron command the platform runs, which directories survive a
@@ -235,26 +240,64 @@ func detectProject(dir string) (kind, because string, err error) {
 		return typeGo, "go.mod", nil
 	}
 
+	// Before package.json, for the reason composer.json is first: a Django
+	// site builds its front end with npm and is not a Node project.
+	if kind, because := detectPython(dir); kind != "" {
+		return kind, because, nil
+	}
+
 	if _, readErr := os.Stat(filepath.Join(dir, "package.json")); readErr == nil {
 		return typeNode, "package.json", nil
 	}
 
 	// A usage error rather than a failure: the fix is an argument, and the
-	// help printed with it lists the four that work.
+	// help printed with it lists the kinds that work.
 	return "", "", Usagef(nil,
-		"nothing here says what this project is: no composer.json, wp-config.php, go.mod or package.json\n"+
-			"  name it: vallic init --type drupal|laravel|wordpress|php|nodejs|go",
+		"nothing here says what this project is: no composer.json, wp-config.php, go.mod, pyproject.toml, requirements.txt or package.json\n"+
+			"  name it: vallic init --type drupal|laravel|wordpress|php|nodejs|go|python|django",
 	)
+}
+
+// The files a Python project declares its dependencies in, the most exact
+// first: a lock names every package, a requirements file may only include
+// another.
+var pythonFiles = []string{"uv.lock", "pyproject.toml", "requirements.txt"}
+
+// detectPython recognises a Python project, and Django among them.
+//
+// Django by manage.py, which `django-admin startproject` writes at the root,
+// or by a dependency on it where the project keeps manage.py elsewhere. The
+// difference is worth the look: Django is the kind whose uploads survive a
+// deploy and whose sessions are cleared, and a Django site written as plain
+// Python keeps neither.
+func detectPython(dir string) (kind, because string) {
+	if _, err := os.Stat(filepath.Join(dir, "manage.py")); err == nil {
+		return typeDjango, "manage.py"
+	}
+
+	for _, file := range pythonFiles {
+		if raw, err := os.ReadFile(filepath.Join(dir, file)); err == nil && pythonRequires(raw, "django") {
+			return typeDjango, file + ", which requires Django"
+		}
+	}
+
+	for _, file := range pythonFiles {
+		if _, err := os.Stat(filepath.Join(dir, file)); err == nil {
+			return typePython, file
+		}
+	}
+
+	return "", ""
 }
 
 // knownProjectType refuses a --type this writes no file for.
 func knownProjectType(kind string) error {
 	switch kind {
-	case typeDrupal, typeLaravel, typeWordPress, typePHP, typeNode, typeGo:
+	case typeDrupal, typeLaravel, typeWordPress, typePHP, typeNode, typeGo, typePython, typeDjango:
 		return nil
 	}
 
-	return Usagef(nil, "--type takes drupal, laravel, wordpress, php, nodejs or go, not %q", kind)
+	return Usagef(nil, "--type takes drupal, laravel, wordpress, php, nodejs, go, python or django, not %q", kind)
 }
 
 // starterFor builds the starting file for one kind of project.
@@ -264,6 +307,8 @@ func starterFor(kind, dir string) *starter {
 		return nodeStarter(dir)
 	case typeGo:
 		return goStarter(dir)
+	case typePython, typeDjango:
+		return pythonStarter(kind, dir)
 	default:
 		return phpStarter(kind, dir)
 	}
@@ -394,6 +439,214 @@ func goStarter(dir string) *starter {
 	manifest.noteUnpinned(readErr == nil, "go", "go.mod")
 
 	return manifest
+}
+
+// pythonStarter is a Python application, Django or not, which serves its own
+// HTTP through Gunicorn.
+//
+// Everything is run as `python -m …` or `python manage.py …`. The virtual
+// environment is built in the checkout and moved into the release, so
+// `python` is always the release's own, while a script such as
+// .venv/bin/gunicorn still names the directory it was built in.
+func pythonStarter(kind, dir string) *starter {
+	manifest := &starter{
+		Type:       kind,
+		VersionKey: "python",
+		Version:    pythonVersion(dir),
+		Services:   []string{"postgres: '18'"},
+	}
+
+	exists := func(name string) bool {
+		_, err := os.Stat(filepath.Join(dir, name))
+
+		return err == nil
+	}
+
+	// Whatever the repository locks with. uv with its lock, so a build
+	// installs exactly what was tested; pip where requirements.txt is what
+	// the project keeps; uv without a lock, resolving afresh, for a
+	// pyproject.toml alone.
+	switch {
+	case exists("uv.lock"):
+		manifest.Build = []string{"uv sync --locked --no-dev --no-editable"}
+	case exists("requirements.txt"):
+		manifest.Build = []string{"python -m venv .venv", ".venv/bin/pip install -r requirements.txt"}
+	case exists("pyproject.toml"):
+		manifest.Build = []string{"uv sync --no-dev --no-editable"}
+		manifest.Notes = append(manifest.Notes,
+			"no uv.lock here, so every build resolves the dependencies again: run uv lock, commit it, and add --locked")
+	default:
+		manifest.Notes = append(manifest.Notes,
+			"no uv.lock, pyproject.toml or requirements.txt here, so no build step is written")
+	}
+
+	if manifest.Version == "" {
+		manifest.Notes = append(manifest.Notes,
+			"nothing here states a Python version — .python-version, or requires-python in pyproject.toml — so none is pinned and the platform's default runs")
+	}
+
+	if kind != typeDjango {
+		// Gunicorn reads gunicorn.conf.py where it starts, and the image
+		// starts it with nothing else, so a project with one needs no line.
+		// Otherwise the application's module and variable are its own, and a
+		// guess would name one that is not there.
+		if !exists("gunicorn.conf.py") {
+			manifest.Notes = append(manifest.Notes,
+				"add a start: line naming what serves the application, such as python -m gunicorn app:app")
+		}
+
+		return manifest
+	}
+
+	// Collected in the build, which can write, and served by the application
+	// from the release. The step needs STATIC_ROOT, which only the settings
+	// can say.
+	manifest.Build = append(manifest.Build, "python manage.py collectstatic --noinput")
+	manifest.Deploy = []string{"'python manage.py migrate --noinput'"}
+
+	project, settings := djangoProject(dir)
+	if project == "" {
+		manifest.Notes = append(manifest.Notes,
+			"no project package with a wsgi.py found, so add a start: line naming the WSGI application")
+	} else {
+		manifest.Start = "python -m gunicorn " + project + ".wsgi"
+	}
+
+	if raw, err := os.ReadFile(settings); err == nil && !strings.Contains(string(raw), "STATIC_ROOT") {
+		name, _ := filepath.Rel(dir, settings)
+		manifest.Notes = append(manifest.Notes,
+			"the build runs collectstatic, which needs STATIC_ROOT in "+filepath.ToSlash(name))
+	}
+
+	return manifest
+}
+
+// The settings module manage.py names, as startproject writes it.
+var djangoSettingsModule = regexp.MustCompile(`DJANGO_SETTINGS_MODULE['"]\s*,\s*['"]([A-Za-z_][\w.]*)['"]`)
+
+// djangoProject finds the package holding the site's wsgi.py and settings.
+//
+// From manage.py where it says, which is the one answer the project itself
+// gives. Otherwise the one directory here holding both files; with none, or
+// with several, the answer is the project's to write rather than this
+// command's to pick.
+func djangoProject(dir string) (project, settings string) {
+	if raw, err := os.ReadFile(filepath.Join(dir, "manage.py")); err == nil {
+		if match := djangoSettingsModule.FindSubmatch(raw); match != nil {
+			module := string(match[1])
+			project, _, _ = strings.Cut(module, ".")
+			settings = filepath.Join(dir, filepath.FromSlash(strings.ReplaceAll(module, ".", "/"))+".py")
+
+			if _, err := os.Stat(filepath.Join(dir, project, "wsgi.py")); err == nil {
+				return project, settings
+			}
+
+			return "", settings
+		}
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", ""
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		wsgi := filepath.Join(dir, entry.Name(), "wsgi.py")
+		candidate := filepath.Join(dir, entry.Name(), "settings.py")
+
+		if _, err := os.Stat(wsgi); err != nil {
+			continue
+		}
+
+		if _, err := os.Stat(candidate); err != nil {
+			continue
+		}
+
+		if project != "" {
+			return "", ""
+		}
+
+		project, settings = entry.Name(), candidate
+	}
+
+	return project, settings
+}
+
+// pythonVersion is the Python the repository says it runs on.
+//
+// .python-version first, which uv and pyenv write and which names the
+// interpreter actually in use; then requires-python, which is a floor rather
+// than a choice but is the version the project has promised to work on. Two
+// components, because the images are tagged `3.14.8-slim-trixie-1` and the
+// catalogue matches a manifest's `3.14` on the version line.
+func pythonVersion(dir string) string {
+	if raw, err := os.ReadFile(filepath.Join(dir, ".python-version")); err == nil {
+		line, _, _ := strings.Cut(strings.TrimSpace(string(raw)), "\n")
+
+		if version := firstVersion(line, 2); strings.Contains(version, ".") {
+			return version
+		}
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, "pyproject.toml"))
+	if err != nil {
+		return ""
+	}
+
+	for _, line := range strings.Split(string(raw), "\n") {
+		key, value, found := strings.Cut(line, "=")
+
+		if found && strings.TrimSpace(key) == "requires-python" {
+			return firstVersion(value, 2)
+		}
+	}
+
+	return ""
+}
+
+// pythonRequires reports whether a dependency file asks for a package.
+//
+// Read the way all three spell a requirement: a requirements.txt line, a
+// quoted entry in pyproject.toml's dependencies, uv.lock's `name = "…"`. Each
+// starts with the package's name, which Python compares ignoring case and
+// treating `-`, `_` and `.` as one character.
+func pythonRequires(raw []byte, name string) bool {
+	for _, line := range strings.Split(string(raw), "\n") {
+		line, _, _ = strings.Cut(line, "#")
+		candidates := []string{strings.TrimSpace(line)}
+
+		for _, quote := range []string{`"`, "'"} {
+			parts := strings.Split(line, quote)
+
+			for i := 1; i < len(parts); i += 2 {
+				candidates = append(candidates, parts[i])
+			}
+		}
+
+		for _, candidate := range candidates {
+			if pythonPackageName(candidate) == name {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// pythonPackageName is the normalised name a requirement starts with.
+func pythonPackageName(requirement string) string {
+	end := strings.IndexFunc(requirement, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.')
+	})
+	if end < 0 {
+		end = len(requirement)
+	}
+
+	return strings.ToLower(strings.NewReplacer("_", "-", ".", "-").Replace(requirement[:end]))
 }
 
 // noteUnpinned records that no version was pinned, and which file would have

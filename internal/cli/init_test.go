@@ -15,7 +15,13 @@ func checkoutWith(t *testing.T, files map[string]string) string {
 	dir := t.TempDir()
 
 	for name, contents := range files {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(contents), 0o644); err != nil {
+		path := filepath.Join(dir, filepath.FromSlash(name))
+
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -69,6 +75,42 @@ func TestDetectProjectReadsTheFilesInTheCheckout(t *testing.T) {
 			name:  "node on its own",
 			files: map[string]string{"package.json": `{}`},
 			want:  typeNode,
+		},
+		{
+			name: "a django site with a front end to build",
+			files: map[string]string{
+				"manage.py":    "import os\n",
+				"package.json": `{"scripts":{"build":"vite build"}}`,
+			},
+			want: typeDjango,
+		},
+		{
+			name:  "django by its requirement, with manage.py elsewhere",
+			files: map[string]string{"requirements.txt": "Django[argon2]>=5.2,<6\npsycopg[binary]\n"},
+			want:  typeDjango,
+		},
+		{
+			name:  "django by pyproject.toml's dependencies",
+			files: map[string]string{"pyproject.toml": "[project]\nname = \"shop\"\ndependencies = [\n  \"django>=5.2\",\n]\n"},
+			want:  typeDjango,
+		},
+		{
+			name:  "python, whose packages only sound like django",
+			files: map[string]string{"pyproject.toml": "[project]\ndependencies = [\"flask>=3\", \"django-environ\"]\n# not django\n"},
+			want:  typePython,
+		},
+		{
+			name:  "python by requirements.txt",
+			files: map[string]string{"requirements.txt": "fastapi\nuvicorn\n"},
+			want:  typePython,
+		},
+		{
+			name: "a go service with its documentation built in python",
+			files: map[string]string{
+				"go.mod":           "module example.com/api\n\ngo 1.27\n",
+				"requirements.txt": "mkdocs\n",
+			},
+			want: typeGo,
 		},
 	}
 
@@ -147,6 +189,31 @@ func TestStarterPinsOnlyWhatTheRepositoryStates(t *testing.T) {
 			want:  "1.27",
 		},
 		{
+			name: "python, from .python-version before requires-python",
+			kind: typePython,
+			files: map[string]string{
+				".python-version": "3.13.2\n",
+				"pyproject.toml":  "[project]\nrequires-python = \">=3.12\"\n",
+			},
+			key:  "python",
+			want: "3.13",
+		},
+		{
+			name:  "python, from the floor requires-python sets",
+			kind:  typeDjango,
+			files: map[string]string{"pyproject.toml": "[project]\nrequires-python = \">=3.12,<4\"\n"},
+			key:   "python",
+			want:  "3.12",
+		},
+		{
+			name:      "python with nothing to say, which is said out loud",
+			kind:      typePython,
+			files:     map[string]string{"requirements.txt": "flask\n"},
+			key:       "python",
+			want:      "",
+			wantsNote: true,
+		},
+		{
 			name:      "nothing at all, which is said out loud",
 			kind:      typePHP,
 			files:     map[string]string{"composer.json": `{"require":{"monolog/monolog":"^3"}}`},
@@ -214,12 +281,17 @@ var manifestKeys = map[string]bool{
 }
 
 func TestStarterUsesOnlyKeysTheControlPlaneUnderstands(t *testing.T) {
-	for _, kind := range []string{typeDrupal, typePHP, typeNode, typeGo} {
+	for _, kind := range []string{typeDrupal, typePHP, typeNode, typeGo, typePython, typeDjango} {
 		t.Run(kind, func(t *testing.T) {
 			rendered := renderStarter(starterFor(kind, checkoutWith(t, map[string]string{
-				"composer.json": `{"require":{"php":"^8.4","drupal/core":"^11"}}`,
-				"package.json":  `{"engines":{"node":"24"},"scripts":{"build":"next build","start":"next start"}}`,
-				"go.mod":        "module example.com/api\n\ngo 1.27\n",
+				"composer.json":      `{"require":{"php":"^8.4","drupal/core":"^11"}}`,
+				"package.json":       `{"engines":{"node":"24"},"scripts":{"build":"next build","start":"next start"}}`,
+				"go.mod":             "module example.com/api\n\ngo 1.27\n",
+				"pyproject.toml":     "[project]\nrequires-python = \">=3.14\"\n",
+				"uv.lock":            "version = 1\n",
+				"manage.py":          `os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")`,
+				"mysite/wsgi.py":     "",
+				"mysite/settings.py": "STATIC_ROOT = BASE_DIR / 'staticfiles'\n",
 			})))
 
 			for _, line := range strings.Split(rendered, "\n") {
@@ -447,5 +519,109 @@ func TestDeployStepsMatchWhatEachFrameworkNeeds(t *testing.T) {
 
 	if !strings.Contains(laravel[0], "--force") {
 		t.Errorf("laravel Deploy = %v, want --force: a prompt nobody can answer hangs the deploy", laravel)
+	}
+}
+
+// The build is whatever the repository locks with. uv with its lock installs
+// exactly what was tested; requirements.txt is pip's file, and uv given it
+// would want a pyproject.toml the project does not have; a pyproject.toml
+// with no lock still builds, but resolves afresh every time, which is worth
+// saying.
+func TestPythonBuildsWithWhatTheRepositoryLocks(t *testing.T) {
+	cases := []struct {
+		name      string
+		files     map[string]string
+		want      []string
+		wantsNote string
+	}{
+		{
+			name:  "uv, held to its lock",
+			files: map[string]string{"pyproject.toml": "[project]\n", "uv.lock": "version = 1\n", "requirements.txt": "flask\n"},
+			want:  []string{"uv sync --locked --no-dev --no-editable"},
+		},
+		{
+			name:  "pip, into the release's own environment",
+			files: map[string]string{"requirements.txt": "flask\n"},
+			want:  []string{"python -m venv .venv", ".venv/bin/pip install -r requirements.txt"},
+		},
+		{
+			name:      "uv with nothing locked",
+			files:     map[string]string{"pyproject.toml": "[project]\n"},
+			want:      []string{"uv sync --no-dev --no-editable"},
+			wantsNote: "uv lock",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := starterFor(typePython, checkoutWith(t, c.files))
+
+			if strings.Join(got.Build, " | ") != strings.Join(c.want, " | ") {
+				t.Errorf("Build = %q, want %q", got.Build, c.want)
+			}
+
+			if c.wantsNote != "" && !strings.Contains(strings.Join(got.Notes, "\n"), c.wantsNote) {
+				t.Errorf("Notes = %q, want one mentioning %q", got.Notes, c.wantsNote)
+			}
+
+			// No start line for a project that is not Django: the module and
+			// the variable are the application's own, and a guess names one
+			// that is not there. Said instead.
+			if got.Start != "" {
+				t.Errorf("Start = %q, want none written for a plain Python project", got.Start)
+			}
+
+			if !strings.Contains(strings.Join(got.Notes, "\n"), "start:") {
+				t.Errorf("Notes = %q, want one asking for a start: line", got.Notes)
+			}
+		})
+	}
+}
+
+// Django's starter does what the framework needs and nothing it cannot know:
+// static files collected in the build, migrate on every deploy — the first
+// one too, which is what creates the tables — and Gunicorn on the WSGI module
+// manage.py names.
+func TestDjangoStarterServesTheProjectManagePyNames(t *testing.T) {
+	dir := checkoutWith(t, map[string]string{
+		"manage.py":                     "os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings.production')\n",
+		"config/wsgi.py":                "",
+		"config/settings/production.py": "DEBUG = False\n",
+		"requirements.txt":              "Django>=5.2\n",
+	})
+
+	got := starterFor(typeDjango, dir)
+
+	if got.Start != "python -m gunicorn config.wsgi" {
+		t.Errorf("Start = %q, want Gunicorn on config.wsgi", got.Start)
+	}
+
+	if last := got.Build[len(got.Build)-1]; last != "python manage.py collectstatic --noinput" {
+		t.Errorf("last build step = %q, want collectstatic after the dependencies", last)
+	}
+
+	if len(got.Deploy) != 1 || !strings.Contains(got.Deploy[0], "manage.py migrate --noinput") {
+		t.Errorf("Deploy = %v, want migrate, with no prompt to hang on", got.Deploy)
+	}
+
+	// The settings have no STATIC_ROOT, so the step the file writes would
+	// fail the first build. Said, with the file that needs it.
+	if !strings.Contains(strings.Join(got.Notes, "\n"), "STATIC_ROOT in config/settings/production.py") {
+		t.Errorf("Notes = %q, want one naming the settings file STATIC_ROOT is missing from", got.Notes)
+	}
+
+	// With no manage.py, the one directory holding wsgi.py and settings.py
+	// is the project; with two, the answer is the project's to give.
+	found, _ := djangoProject(checkoutWith(t, map[string]string{"shop/wsgi.py": "", "shop/settings.py": ""}))
+	if found != "shop" {
+		t.Errorf("djangoProject() = %q, want the one package holding both files", found)
+	}
+
+	ambiguous, _ := djangoProject(checkoutWith(t, map[string]string{
+		"shop/wsgi.py": "", "shop/settings.py": "",
+		"blog/wsgi.py": "", "blog/settings.py": "",
+	}))
+	if ambiguous != "" {
+		t.Errorf("djangoProject() = %q from two candidates, want none picked", ambiguous)
 	}
 }

@@ -172,6 +172,67 @@ func TestAFollowRidesOutARateLimitInsteadOfAbandoningTheDeploy(t *testing.T) {
 	}
 }
 
+// A wait follows the task the control plane names, not the deployment's id.
+//
+// The two are numbered apart. A wait that asked for the deployment's id as a
+// task's was told there was no such task — or, had one existed, would have
+// reported its ending as this deploy's.
+func TestAWaitFollowsTheDeploymentsTask(t *testing.T) {
+	var elsewhere int64
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/tasks/40/log"):
+			_, _ = w.Write([]byte(`{"log":{"offset":0,"content":"live\n","next_offset":5,` +
+				`"size":5,"truncated":false,"state":"succeeded","complete":true}}`))
+		case strings.HasSuffix(r.URL.Path, "/tasks/40"):
+			_, _ = w.Write([]byte(`{"task":{"id":40,"type":"deploy","state":"succeeded"}}`))
+		default:
+			atomic.AddInt64(&elsewhere, 1)
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"No such task."}}`))
+		}
+	}))
+	defer server.Close()
+
+	env, _, errOut := followEnv(t)
+	env.client = api.New(server.URL, auth.Anonymous{}, "test")
+
+	task := 40
+	if err := env.waitForDeployment(context.Background(), &api.Deployment{ID: 12, Task: &task}, 10*time.Second); err != nil {
+		t.Fatalf("waitForDeployment: %v", err)
+	}
+
+	if n := atomic.LoadInt64(&elsewhere); n != 0 {
+		t.Errorf("%d request(s) went to a task other than 40", n)
+	}
+
+	if !strings.Contains(errOut.String(), "task 40") {
+		t.Errorf("stderr = %q, want it to say which task it follows", errOut.String())
+	}
+}
+
+// A control plane that does not name the task is not guessed at.
+//
+// Following the deployment's id instead is the defect: it reports another
+// task's ending, or none, as this deploy's.
+func TestAWaitWithoutATaskIsRefused(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("a wait with no task asked the control plane for one anyway")
+	}))
+	defer server.Close()
+
+	env, _, _ := followEnv(t)
+	env.client = api.New(server.URL, auth.Anonymous{}, "test")
+
+	err := env.waitForDeployment(context.Background(), &api.Deployment{ID: 12}, 10*time.Second)
+	if err == nil || !strings.Contains(err.Error(), "vallic activity list") {
+		t.Fatalf("err = %v, want a refusal that says where to look", err)
+	}
+}
+
 // followEnv is an Env that writes where a test can read it.
 func followEnv(t *testing.T) (*Env, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()

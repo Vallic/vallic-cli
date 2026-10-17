@@ -79,7 +79,7 @@ set. The output says which it is going to be.`,
 				// after. `build --deploy` skipped it until [2026-09-30], which
 				// made the flag a way round a question the other path asks.
 				if asksBeforeShipping(deploy, detail.Protected, env.Interactive()) {
-					if !env.confirm(fmt.Sprintf("Build and deploy to %s, which is protected?", detail.Name)) {
+					if !env.confirm(fmt.Sprintf("Build and deploy to %s, which is protected?", target.Named())) {
 						return fmt.Errorf("cancelled")
 					}
 				}

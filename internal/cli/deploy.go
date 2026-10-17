@@ -74,7 +74,7 @@ the whole of the check.`,
 				// environment, not operating one — but a `vallic deploy` run
 				// from the wrong checkout should be recoverable before it
 				// happens rather than after.
-				if !env.confirm(fmt.Sprintf("Deploy to %s, which is protected?", detail.Name)) {
+				if !env.confirm(fmt.Sprintf("Deploy to %s, which is protected?", target.Named())) {
 					return fmt.Errorf("cancelled")
 				}
 			}
@@ -160,9 +160,20 @@ func (e *Env) waitForDeployment(ctx context.Context, deployment *api.Deployment,
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	e.Printer.Say("Waiting for deployment %d…", deployment.ID)
+	// The task the control plane says is doing it, and never the deployment's
+	// own id: the two are numbered apart, and following that one found
+	// another task's log, or none. A control plane that does not say cannot
+	// be followed from here, and a wait that guessed would report another
+	// task's ending as this deploy's.
+	if deployment.Task == nil {
+		return fmt.Errorf("deployment %d is queued, but this control plane does not say which task runs it; follow it with `vallic activity list`", deployment.ID)
+	}
 
-	state, err := e.follow(ctx, client, deployment.ID, e.Err)
+	id := *deployment.Task
+
+	e.Printer.Say("Waiting for deployment %d (task %d)…", deployment.ID, id)
+
+	state, err := e.follow(ctx, client, id, e.Err)
 	if err != nil {
 		return err
 	}
@@ -171,7 +182,7 @@ func (e *Env) waitForDeployment(ctx context.Context, deployment *api.Deployment,
 	// log route carries the state so the loop above needs one request per
 	// tick; it deliberately does not carry the rest, because that is the
 	// task's contract and not the log's.
-	task, err := client.Task(ctx, deployment.ID)
+	task, err := client.Task(ctx, id)
 	if err != nil {
 		// The work finished and this is only the epilogue failing. Reporting
 		// the state we already saw beats turning a successful deploy into an

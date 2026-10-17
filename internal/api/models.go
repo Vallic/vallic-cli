@@ -107,6 +107,18 @@ type EnvironmentDetail struct {
 	// Hostnames is what the environment answers on. Nil only against a
 	// control plane that predates the member.
 	Hostnames *Hostnames `json:"hostnames"`
+
+	// Servers are the machines the environment runs on, by the IDs `server
+	// list` prints, limited to those the caller may see. Not nil where SSH
+	// is: staff outside the team get no shell target and still need the
+	// machine. Nil only against a control plane that predates the member.
+	Servers []EnvironmentServer `json:"servers"`
+}
+
+// EnvironmentServer is one placement of an environment on a machine.
+type EnvironmentServer struct {
+	ID   int    `json:"id"`
+	Role string `json:"role"`
 }
 
 // Hostnames is where an environment can be reached.
@@ -372,6 +384,12 @@ type Deployment struct {
 
 	// SkipSteps says it goes live without the application's deploy steps.
 	SkipSteps bool `json:"skip_steps"`
+
+	// Task is the work doing it, whose log is the deploy's. Not the
+	// deployment's own id: the two are numbered apart, and following the
+	// deployment's id as a task's found another task or none. Nil against a
+	// control plane that predates the member, and where nothing was queued.
+	Task *int `json:"task"`
 }
 
 // Describe says what happened, in the words the trigger calls for.
