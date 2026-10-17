@@ -119,12 +119,18 @@ type Resolver struct {
 	// Dir is the working directory whose git remote and branch are read.
 	Dir string
 
-	// ProjectHint and EnvironmentHint are the flag, then the environment
-	// variable, then the config file — settled by the caller before it gets
-	// here, because the precedence is the same for both and belongs in one
-	// place.
+	// ProjectHint and EnvironmentHint are what this command was told: the
+	// flag, then the environment variable — and for the environment, the
+	// config file — settled by the caller before it gets here.
 	ProjectHint     string
 	EnvironmentHint string
+
+	// ProjectRecorded is what `vallic link` wrote in the configuration. It
+	// answers for every directory on the machine, so it is asked only where
+	// the checkout cannot answer: read before the git remote, a project
+	// linked for one checkout sent `vallic drush` and `vallic deploy` run in
+	// another to the first one's production.
+	ProjectRecorded string
 }
 
 // Project picks the project.
@@ -147,6 +153,12 @@ func (r *Resolver) Project(ctx context.Context) (*api.Project, error) {
 		if match := projectByRepository(projects, remote); match != nil {
 			return match, nil
 		}
+	}
+
+	// What was linked, for a checkout whose remote names no project here: a
+	// fork, a mirror, a directory with no git at all.
+	if r.ProjectRecorded != "" {
+		return matchProject(projects, r.ProjectRecorded)
 	}
 
 	if len(projects) == 1 {

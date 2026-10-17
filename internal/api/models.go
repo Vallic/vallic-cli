@@ -372,6 +372,12 @@ type Deployment struct {
 
 	// SkipSteps says it goes live without the application's deploy steps.
 	SkipSteps bool `json:"skip_steps"`
+
+	// Task is the work doing it, whose log is the deploy's. Not the
+	// deployment's own id: the two are numbered apart, and following the
+	// deployment's id as a task's found another task or none. Nil against a
+	// control plane that predates the member, and where nothing was queued.
+	Task *int `json:"task"`
 }
 
 // Describe says what happened, in the words the trigger calls for.

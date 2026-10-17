@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -203,6 +204,92 @@ func TestProjectIsMatchedByRepository(t *testing.T) {
 	if got := projectByRepository(client.projects, "git@github.com:acme/other.git"); got != nil {
 		t.Errorf("projectByRepository matched %v, want no match", got)
 	}
+}
+
+// A checkout that names its project answers ahead of anything linked.
+//
+// The link is one answer for every directory on the machine. Read first, a
+// project linked once answered in a checkout of another, and a command run
+// there reached the linked project's environments instead of its own.
+func TestACheckoutBeatsTheRecordedProject(t *testing.T) {
+	client := &fakeClient{
+		projects: []api.Project{
+			{ID: 1, MachineName: "blog", Repository: repo("acme/blog")},
+			{ID: 2, MachineName: "webshop", Repository: repo("acme/shop")},
+		},
+	}
+
+	r := &Resolver{Client: client, Dir: checkout(t, "git@github.com:acme/shop.git"), ProjectRecorded: "blog"}
+
+	got, err := r.Project(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MachineName != "webshop" {
+		t.Errorf("resolved %s, want the checkout's own webshop", got.MachineName)
+	}
+}
+
+// The linked project answers where the checkout cannot: no git, or a remote
+// naming no project this credential can see.
+func TestTheRecordedProjectAnswersWhereTheCheckoutCannot(t *testing.T) {
+	client := &fakeClient{
+		projects: []api.Project{
+			{ID: 1, MachineName: "blog", Repository: repo("acme/blog")},
+			{ID: 2, MachineName: "webshop", Repository: repo("acme/shop")},
+		},
+	}
+
+	for name, dir := range map[string]string{
+		"no git":          t.TempDir(),
+		"a fork's remote": checkout(t, "git@github.com:someone/shop-fork.git"),
+	} {
+		got, err := (&Resolver{Client: client, Dir: dir, ProjectRecorded: "blog"}).Project(context.Background())
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got.MachineName != "blog" {
+			t.Errorf("%s: resolved %s, want the linked blog", name, got.MachineName)
+		}
+	}
+}
+
+// What this command was told — a flag, VALLIC_PROJECT — beats the checkout.
+func TestTheHintBeatsTheCheckout(t *testing.T) {
+	client := &fakeClient{
+		projects: []api.Project{
+			{ID: 1, MachineName: "blog", Repository: repo("acme/blog")},
+			{ID: 2, MachineName: "webshop", Repository: repo("acme/shop")},
+		},
+	}
+
+	r := &Resolver{Client: client, Dir: checkout(t, "git@github.com:acme/shop.git"), ProjectHint: "blog"}
+
+	got, err := r.Project(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MachineName != "blog" {
+		t.Errorf("resolved %s, want the blog the command was told", got.MachineName)
+	}
+}
+
+// checkout makes a git repository whose origin is remote.
+func checkout(t *testing.T, remote string) string {
+	t.Helper()
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+
+	dir := t.TempDir()
+	for _, args := range [][]string{{"init", "-q"}, {"remote", "add", "origin", remote}} {
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+
+	return dir
 }
 
 // Two projects and nothing to choose between them is a question, not a guess.

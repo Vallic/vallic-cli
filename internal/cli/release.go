@@ -234,9 +234,9 @@ func (e *Env) putBack(
 	}
 
 	if detail.Protected && !yes && e.Interactive() {
-		question := fmt.Sprintf("Roll %s back, which is protected?", detail.Name)
+		question := fmt.Sprintf("Roll %s back, which is protected?", target.Named())
 		if kind == "redeploy" {
-			question = fmt.Sprintf("Redeploy %s, which is protected?", detail.Name)
+			question = fmt.Sprintf("Redeploy %s, which is protected?", target.Named())
 		}
 
 		if !e.confirm(question) {

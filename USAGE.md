@@ -22,7 +22,8 @@ vallic login --token
 vallic whoami
 vallic team
 
-# Record which project this directory is, outside a clone of its repository
+# Record a project for directories that are not a clone of its repository.
+# One for the whole machine: a clone's own remote still answers first.
 vallic link acme-site
 
 # What this checkout points at: project, environment, branch, last deploy

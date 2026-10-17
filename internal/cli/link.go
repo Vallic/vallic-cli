@@ -21,10 +21,10 @@ import (
 //
 // What it records is not a property of the checkout, and that is the whole
 // caveat. It goes in the configuration this machine shares between every
-// directory, and the resolver reads it *before* the git remote, so a
-// recorded project answers for the checkouts that were answering correctly
-// too. Every message below says so rather than leaving it to be discovered
-// when a deploy names the wrong site.
+// directory, so the resolver reads it only *after* the git remote: a
+// checkout that names its own project goes on resolving to it. Read first,
+// a project linked once answered for every checkout on the machine, and a
+// command run in one project's checkout acted on another project.
 func linkCommand() *Command {
 	var forget bool
 
@@ -43,9 +43,9 @@ added under another name, or a directory that is not a checkout at all.
 With no argument it says what is recorded now, or what commands resolve to
 here without it.
 
-What it records is machine-wide, not per checkout: it is read before the git
-remote, so every other checkout on this machine resolves to it as well.
---clear puts that back.
+What it records is machine-wide, not per checkout, so it answers only where
+a checkout cannot: a checkout whose git remote names a project you can see
+goes on resolving to that project. --clear forgets it.
 
 It records no environment, and that is deliberate. The environment comes from
 the branch, which changes while you work. An environment recorded once would
@@ -110,7 +110,7 @@ VALLIC_ENVIRONMENT.`,
 			env.Printer.Good("Commands act on %s where a checkout cannot say.", chosen.MachineName)
 
 			if dir, dirErr := config.Dir(); dirErr == nil {
-				env.Printer.Say("  recorded in %s, for every checkout on this machine", dir)
+				env.Printer.Say("  recorded in %s, for the checkouts on this machine that cannot say", dir)
 			}
 
 			warnOverridden(ctx, env, projects, chosen)
@@ -142,40 +142,46 @@ func reportLink(ctx context.Context, env *Env, cfg *config.Config, projects []ap
 		})
 	}
 
-	if recorded == "" {
-		if inferred == nil {
-			if len(projects) == 0 {
-				return fmt.Errorf("this credential can see no projects, so there is nothing to link to")
-			}
-
-			// The state this command exists for. Named as usage, because the
-			// fix is an argument and the candidates are the useful half of
-			// the answer.
-			return Usagef(nil,
-				"nothing is recorded, and this checkout does not say which project it is\n"+
-					"  record one: vallic link <project>\n  it can be: %s",
-				strings.Join(projectNames(projects), ", "),
-			)
-		}
-
-		env.Printer.Line("%s", inferred.MachineName)
-		env.Printer.Say("  worked out here; nothing is recorded, and nothing needs to be")
+	// VALLIC_PROJECT, which every command reads before the checkout and the
+	// file. Worth separating, because --clear removes the file's and not it.
+	if fromEnv := os.Getenv("VALLIC_PROJECT"); fromEnv != "" {
+		env.Printer.Line("%s", fromEnv)
+		env.Printer.Say("  from VALLIC_PROJECT, which every command reads first")
 
 		return nil
 	}
 
-	env.Printer.Line("%s", recorded)
+	// The checkout, which answers ahead of anything recorded.
+	if inferred != nil {
+		env.Printer.Line("%s", inferred.MachineName)
+		env.Printer.Say("  worked out from this checkout")
 
-	if fromEnv := os.Getenv("VALLIC_PROJECT"); fromEnv == recorded {
-		// Not the file, whatever the file says. Worth separating, because
-		// --clear removes one of these and not the other.
-		env.Printer.Say("  from VALLIC_PROJECT, which is read before the configuration file")
-	} else if dir, err := config.Dir(); err == nil {
-		env.Printer.Say("  recorded in %s, for every checkout on this machine", dir)
+		if recorded != "" && recorded != inferred.MachineName {
+			env.Printer.Say("  %s is recorded too, and answers only where a checkout cannot say", recorded)
+		}
+
+		return nil
 	}
 
-	if inferred != nil && inferred.MachineName != recorded {
-		env.Printer.Warn("this checkout resolves to %s on its own, and the recorded project is read first", inferred.MachineName)
+	if recorded == "" {
+		if len(projects) == 0 {
+			return fmt.Errorf("this credential can see no projects, so there is nothing to link to")
+		}
+
+		// The state this command exists for. Named as usage, because the
+		// fix is an argument and the candidates are the useful half of the
+		// answer.
+		return Usagef(nil,
+			"nothing is recorded, and this checkout does not say which project it is\n"+
+				"  record one: vallic link <project>\n  it can be: %s",
+			strings.Join(projectNames(projects), ", "),
+		)
+	}
+
+	env.Printer.Line("%s", recorded)
+
+	if dir, err := config.Dir(); err == nil {
+		env.Printer.Say("  recorded in %s, for the checkouts on this machine that cannot say", dir)
 	}
 
 	return nil
@@ -210,31 +216,31 @@ func clearLink(env *Env, cfg *config.Config) error {
 		// command reads the same variable again.
 		env.Printer.Good("The configuration file records no project now.")
 	default:
-		env.Printer.Good("Forgot %s. Checkouts answer for themselves again.", was)
+		env.Printer.Good("Forgot %s. A checkout that cannot say which project it is will be asked.", was)
 	}
 
 	if fromEnv != "" {
-		env.Printer.Warn("VALLIC_PROJECT is set to %s, and it is read before the file", fromEnv)
+		env.Printer.Warn("VALLIC_PROJECT is set to %s, and every command reads it first", fromEnv)
 	}
 
 	return nil
 }
 
-// warnOverridden says what the link has taken over from.
+// warnOverridden says where the link will not answer.
 //
-// A link is silent by nature: it changes what every later command resolves to
-// and prints nothing at the time. Somebody who has just recorded a project in
-// a checkout that was resolving correctly has made that checkout point
-// somewhere else, and this is the only moment they can be told.
+// A link is silent by nature: it changes what later commands resolve to and
+// prints nothing at the time. Somebody who has just linked a project here
+// while this checkout names another expects the link to answer for it, and
+// it does not: the checkout comes first.
 func warnOverridden(ctx context.Context, env *Env, projects []api.Project, chosen *api.Project) {
 	if fromEnv := os.Getenv("VALLIC_PROJECT"); fromEnv != "" && fromEnv != chosen.MachineName {
-		env.Printer.Warn("VALLIC_PROJECT is set to %s, is read before the file, and has not changed", fromEnv)
+		env.Printer.Warn("VALLIC_PROJECT is set to %s, every command reads it first, and it has not changed", fromEnv)
 	}
 
 	inferred := inferProject(ctx, projects)
 
 	if inferred != nil && inferred.ID != chosen.ID {
-		env.Printer.Warn("this checkout resolved to %s before this, and a recorded project is read first", inferred.MachineName)
+		env.Printer.Warn("this checkout goes on resolving to %s, which its git remote names; the link answers only where a checkout cannot say", inferred.MachineName)
 	}
 }
 
