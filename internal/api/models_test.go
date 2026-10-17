@@ -357,3 +357,19 @@ func TestARetryAfterSurvivesAResponseWithNoEnvelope(t *testing.T) {
 		t.Errorf("RetryAfter = %v, want 7s", apiErr.RetryAfter)
 	}
 }
+
+// `--format json` re-encodes these structs, so a member the struct lacks is a
+// member the CLI's JSON drops.
+func TestEnvironmentServersSurviveReencoding(t *testing.T) {
+	var detail EnvironmentDetail
+	if err := json.Unmarshal([]byte(`{"id":9,"ssh":null,"servers":[{"id":42,"role":"web"},{"id":43,"role":"db"}]}`), &detail); err != nil {
+		t.Fatal(err)
+	}
+	out, err := json.Marshal(detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"servers":[{"id":42,"role":"web"},{"id":43,"role":"db"}]`) {
+		t.Fatalf("servers lost: %s", out)
+	}
+}

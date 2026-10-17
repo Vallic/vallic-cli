@@ -107,6 +107,18 @@ type EnvironmentDetail struct {
 	// Hostnames is what the environment answers on. Nil only against a
 	// control plane that predates the member.
 	Hostnames *Hostnames `json:"hostnames"`
+
+	// Servers are the machines the environment runs on, by the IDs `server
+	// list` prints, limited to those the caller may see. Not nil where SSH
+	// is: staff outside the team get no shell target and still need the
+	// machine. Nil only against a control plane that predates the member.
+	Servers []EnvironmentServer `json:"servers"`
+}
+
+// EnvironmentServer is one placement of an environment on a machine.
+type EnvironmentServer struct {
+	ID   int    `json:"id"`
+	Role string `json:"role"`
 }
 
 // Hostnames is where an environment can be reached.
