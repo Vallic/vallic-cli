@@ -1052,6 +1052,10 @@ type Manifest struct {
 	// platform did not write. Declared in the manifest, defined by a compose
 	// fragment the control plane does not echo and this does not ask for.
 	Extras []ManifestExtra `json:"extras"`
+
+	// BackupExclude is what the files backup leaves out beside the
+	// framework's own caches, as the file wrote it.
+	BackupExclude []string `json:"backup_exclude"`
 }
 
 // ManifestService is one service a repository asked to run beside it.

@@ -330,6 +330,7 @@ func manifestEntries(manifest *api.Manifest) []manifestEntry {
 	add("required env", strings.Join(manifest.RequiredEnv, ", "))
 	add("mounts", strings.Join(manifest.Mounts, ", "))
 	add("extras", manifestExtras(manifest.Extras))
+	add("backup exclude", strings.Join(manifest.BackupExclude, ", "))
 
 	return entries
 }
