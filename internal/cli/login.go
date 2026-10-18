@@ -99,13 +99,10 @@ func runDeviceFlow(
 		return nil, describeAuthFailure(err, client.BaseURL)
 	}
 
-	// The complete URI first, because a code typed by hand is a code
-	// mistyped by hand. The plain one and the code are printed too: a
+	// The plain address, never one with the code in it: the code is typed
+	// on the page, from this terminal. Printed as well as opened, because a
 	// browser on another machine is the whole reason this grant exists.
-	target := device.VerificationURIComplete
-	if target == "" {
-		target = device.VerificationURI
-	}
+	target := device.VerificationURI
 
 	opened := false
 	if !noBrowser && env.Interactive() {
@@ -114,7 +111,7 @@ func runDeviceFlow(
 
 	if opened {
 		env.Printer.Say("Opened %s", target)
-		env.Printer.Say("Confirm the code shown there: %s", device.UserCode)
+		env.Printer.Say("Enter the code there: %s", device.UserCode)
 	} else {
 		env.Printer.Say("Open %s", device.VerificationURI)
 		env.Printer.Say("and enter the code: %s", device.UserCode)

@@ -124,6 +124,31 @@ func TestVerbStreamsWithoutATerminal(t *testing.T) {
 	}
 }
 
+// A dump is compressed on the wire only when asked, and never on the hop to
+// the front: the ProxyCommand carries bytes ssh has already compressed.
+func TestVerbCompressesOnlyWhenAsked(t *testing.T) {
+	plain := targetFor(2299)
+
+	if contains(plain.Verb("db-export", false).Args, "-C") {
+		t.Error("compressed without being asked")
+	}
+
+	compressed := targetFor(2299)
+	compressed.Compress = true
+	compressed.Machine = "web-2"
+	cmd := compressed.Verb("db-export", false)
+
+	if !contains(cmd.Args, "-C") {
+		t.Errorf("args = %v, want -C", cmd.Args)
+	}
+
+	for _, arg := range cmd.Args {
+		if strings.HasPrefix(arg, "ProxyCommand=") && strings.Contains(arg, " -C") {
+			t.Errorf("the hop compresses too: %q", arg)
+		}
+	}
+}
+
 // A prompt is the same verb mechanism with the pty asked for, because that is
 // the only difference between a client that reads a dump and one somebody
 // types into.

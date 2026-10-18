@@ -39,6 +39,12 @@ type Target struct {
 	// Container is a container to open other than the application's: a
 	// worker, by name.
 	Container string
+
+	// Compress asks ssh to compress the stream, for a verb whose output is a
+	// database dump: text that shrinks several times over, crossing the
+	// internet. The agent's verbs are fixed words, so `| gzip` cannot be
+	// added on the far side, and this is the compression that is left.
+	Compress bool
 }
 
 // jumpTarget is the machine a connection is carried on to, or empty.
@@ -259,6 +265,10 @@ func (t *Target) Verb(verb string, tty bool) *exec.Cmd {
 		args = append(args, "-T")
 	}
 
+	if t.Compress {
+		args = append(args, "-C")
+	}
+
 	args = append(args, t.Destination(), t.named(verb))
 
 	return command("ssh", args...)
@@ -316,6 +326,12 @@ func quoteAll(args []string) string {
 	}
 
 	return strings.Join(quoted, " ")
+}
+
+// Quote is quote, for a caller printing a line somebody can paste: a path
+// beside a redirect in `--dry-run` output.
+func Quote(arg string) string {
+	return quote(arg)
 }
 
 // quote wraps a single argument for the shell on the far side.

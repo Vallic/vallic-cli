@@ -44,11 +44,11 @@ type DeviceAuth struct {
 	DeviceCode string `json:"device_code"`
 	UserCode   string `json:"user_code"`
 
-	// VerificationURI is the page to open. VerificationURIComplete has the
-	// code already in it, and is what the CLI should offer first — a code
-	// typed by hand is a code mistyped by hand.
-	VerificationURI         string `json:"verification_uri"`
-	VerificationURIComplete string `json:"verification_uri_complete,omitempty"`
+	// VerificationURI is the page to open, the same for everybody: the code
+	// is typed there. A verification_uri_complete, with the code in it, is
+	// not read — a link that fills the code in is what somebody would send a
+	// person to approve their sign-in instead.
+	VerificationURI string `json:"verification_uri"`
 
 	ExpiresIn int `json:"expires_in"`
 	Interval  int `json:"interval,omitempty"`

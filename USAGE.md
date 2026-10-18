@@ -20,7 +20,13 @@ vallic login --token
 
 # Who the stored credential belongs to, and which teams it reaches
 vallic whoami
-vallic team
+vallic team list
+
+# Put your SSH key on your account, for ssh, db and mount: the first of
+# ~/.ssh/id_ed25519.pub, id_ecdsa.pub and id_rsa.pub, or the one you name
+vallic ssh-key add
+vallic ssh-key add ~/.ssh/vallic.pub --label work-laptop
+vallic ssh-key list
 
 # Record a project for directories that are not a clone of its repository.
 # One for the whole machine: a clone's own remote still answers first.
@@ -54,8 +60,10 @@ vallic url staging --open
 ## vallic.yaml
 
 ```bash
-# A starting file from what the checkout looks like
-vallic init --type drupal
+# A starting file from what the checkout looks like: composer.json, go.mod,
+# Cargo.toml, pyproject.toml, Gemfile or package.json (on Bun with a bun.lock)
+vallic init
+vallic init --type rust
 
 # Check it before committing: on its own, or against what an environment runs
 vallic validate --local
@@ -72,8 +80,28 @@ vallic env create feature/checkout --type development --auto-deploy
 vallic env source staging --branch release/2.0
 vallic env source staging --auto-deploy false
 
+# Put staging behind its offline page while something is fixed, and back
+vallic env maintenance on staging --note "Back at 15:00"
+vallic env maintenance off staging
+
 # Remove an environment and its machines
 vallic env delete feature-checkout
+```
+
+## The team
+
+```bash
+# Who is in the team, and the invitations still waiting
+vallic team people
+
+# Invite somebody; the link is printed once and no mail is sent
+vallic team invite ana@example.com --role developer
+vallic team invite contractor@example.com --role developer --projects acme-site
+
+# Another role, take somebody off, or take an invitation back
+vallic team role ana@example.com admin
+vallic team remove contractor@example.com
+vallic team withdraw old@example.com
 ```
 
 ## Building and deploying
@@ -106,8 +134,15 @@ vallic activity list production --type deploy,build --limit 20
 vallic activity get 1234
 vallic activity log 1234 --follow
 
+# Call off a deploy still waiting in the queue; one already running finishes
+vallic activity cancel 1235
+
 # Where the site's logs go
 vallic logs production
+
+# CPU, memory and disk: now, on average and at peak
+vallic metrics production
+vallic metrics production --window 7d
 ```
 
 ## A shell and commands
@@ -179,16 +214,36 @@ vallic mount upload staging ./files --delete
 ## Databases
 
 ```bash
-# A copy of production's database, then onto staging
+# A copy of production's database, in a file named for it, then onto staging
+vallic db dump production
+vallic db import staging --file acme--production--dump.sql
+
+# Compressed, with the time in the name so the last one is kept; import
+# decompresses whatever it is given
+vallic db dump production --gzip --timestamp
+vallic db import staging -f acme--production--20261018-031500-UTC--dump.sql.gz
+
+# Somewhere else, or named outright
+vallic db dump production --directory ~/dumps
+vallic db dump production --file before-upgrade.sql.gz
+
+# Part of it: some tables, all but some, or the schema alone
+vallic db dump production --table users --table orders
+vallic db dump production --exclude-table cache_render,sessions
+vallic db dump production --schema-only
+
+# How much it holds, and the largest tables
+vallic db size production
+
+# A stream, for a pipeline
 vallic db export production > production.sql
+vallic db export production --gzip > production.sql.gz
 vallic db import staging < production.sql
 
-# Compressed on the way out
-vallic db export production | gzip > production.sql.gz
-gunzip -c production.sql.gz | vallic db import staging
-
-# An interactive prompt
+# An interactive prompt, one query, or a file of them
 vallic sql staging
+vallic sql production -- 'SELECT COUNT(*) FROM users'
+vallic sql staging < fix.sql
 
 # A local port onto the database, for a desktop client, and the credentials
 vallic tunnel staging db --port 3307
@@ -226,6 +281,11 @@ vallic var set PAYMENT_KEY sk_live_example production --secret
 vallic var get API_URL staging
 vallic var delete OLD_FLAG staging
 
+# Add every variable in a .env, all or none; see first what it would add
+vallic var import .env.production production --dry-run
+vallic var import .env.production production
+vallic var import .env.shared --scope project --secret STRIPE_KEY,DB_PASSWORD
+
 # Restart the site so changed variables take effect now
 vallic var apply production
 ```
@@ -246,6 +306,29 @@ vallic domain delete old.example.com production
 
 `domain verify` exits 0 when the answer is "not yet", so a retry loop does not
 fail on a record that has not propagated.
+
+## The CDN
+
+```bash
+# What it caches, and for how long
+vallic cdn show production
+
+# Empty it after a change the site's own cache headers do not cover
+vallic cdn clear production
+```
+
+## Coming from Upsun
+
+Upsun's `noun:verb` spelling is read as the two words it stands for, and the
+commands spelled differently here are mapped to what does the same thing:
+
+```bash
+vallic db:dump production        # vallic db dump production
+vallic environment:list          # vallic env list
+vallic db:sql production         # vallic sql production
+vallic user:add ana@example.com --role developer   # vallic team invite …
+vallic self:update               # vallic self-update
+```
 
 ## In scripts and CI
 

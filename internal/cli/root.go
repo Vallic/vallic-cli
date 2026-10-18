@@ -30,6 +30,9 @@ to production.`,
 			logoutCommand(),
 			whoamiCommand(),
 			teamCommand(),
+			// The keys every shell logs in with: the person's own, beside
+			// who they are signed in as.
+			sshKeyCommand(),
 
 			// Starting in a checkout. Both run before anything on the
 			// platform has to exist: init needs no credential at all, and
@@ -50,6 +53,10 @@ to production.`,
 			serviceCommand(),
 			validateCommand(),
 			domainCommand(),
+			// What the edge in front of a site holds, and the site's own
+			// use of its machines.
+			cdnCommand(),
+			metricsCommand(),
 
 			// Keeping copies.
 			backupCommand(),

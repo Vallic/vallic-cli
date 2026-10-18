@@ -667,3 +667,211 @@ func (c *Client) LatestCLI(ctx context.Context, channel string) (*CLIRelease, er
 
 	return &out, nil
 }
+
+// CancelTask cancels a task that has not started.
+//
+// Only one that is still waiting: a deploy half way through is not something
+// a cancel can put back, so the control plane answers 409 for anything a
+// machine has already claimed, in its own words.
+func (c *Client) CancelTask(ctx context.Context, id int) (*TaskCancelled, error) {
+	var out TaskCancelled
+
+	if err := c.post(ctx, fmt.Sprintf("/tasks/%d/cancel", id), nil, &out); err != nil {
+		return nil, err
+	}
+
+	return &out, nil
+}
+
+// SSHKeys lists the public keys on the signed-in person's account.
+//
+// The person's own, whichever team the credential is for: a key opens every
+// environment the person may open. Not reachable with a personal access token,
+// which the control plane refuses for everything under /me but /me itself.
+func (c *Client) SSHKeys(ctx context.Context) ([]SSHKey, error) {
+	var out struct {
+		Keys []SSHKey `json:"ssh_keys"`
+	}
+
+	if err := c.get(ctx, "/me/ssh-keys", &out); err != nil {
+		return nil, err
+	}
+
+	return out.Keys, nil
+}
+
+// AddSSHKey puts a public key on the signed-in person's account.
+func (c *Client) AddSSHKey(ctx context.Context, label, publicKey string) (*SSHKeyAdded, error) {
+	var out SSHKeyAdded
+
+	body := map[string]string{"label": label, "public_key": publicKey}
+
+	if err := c.post(ctx, "/me/ssh-keys", body, &out); err != nil {
+		return nil, err
+	}
+
+	return &out, nil
+}
+
+// RemoveSSHKey takes a key off the signed-in person's account. The control
+// plane answers with no body.
+func (c *Client) RemoveSSHKey(ctx context.Context, id int) error {
+	return c.delete(ctx, fmt.Sprintf("/me/ssh-keys/%d", id), nil)
+}
+
+// CDN reads an environment's CDN settings from the edge. 404 where the
+// environment is not served through the CDN, 409 where the CDN cannot be
+// asked just now; both in the control plane's words.
+func (c *Client) CDN(ctx context.Context, environmentID int) (*CDN, error) {
+	var out CDN
+
+	if err := c.get(ctx, fmt.Sprintf("/environments/%d/cdn", environmentID), &out); err != nil {
+		return nil, err
+	}
+
+	return &out, nil
+}
+
+// ClearCDN empties the CDN's cache for an environment. Accepted rather than
+// done: the edge serves fresh copies within a minute or so.
+func (c *Client) ClearCDN(ctx context.Context, environmentID int) (*Said, error) {
+	var out Said
+
+	if err := c.post(ctx, fmt.Sprintf("/environments/%d/cdn/clear", environmentID), nil, &out); err != nil {
+		return nil, err
+	}
+
+	return &out, nil
+}
+
+// SetMaintenance puts an environment behind its offline page, or takes it
+// out. note is the line the page shows; nil keeps the one it has.
+func (c *Client) SetMaintenance(ctx context.Context, environmentID int, on bool, note *string) (*Maintenance, error) {
+	var out Maintenance
+
+	body := map[string]any{"maintenance": on}
+	if note != nil {
+		body["note"] = *note
+	}
+
+	if err := c.post(ctx, fmt.Sprintf("/environments/%d/maintenance", environmentID), body, &out); err != nil {
+		return nil, err
+	}
+
+	return &out, nil
+}
+
+// ParseVariables reads a .env the way an import would, and touches nothing.
+func (c *Client) ParseVariables(ctx context.Context, pasted string) (*ParsedVariables, error) {
+	var out ParsedVariables
+
+	if err := c.post(ctx, "/variables/parse", map[string]any{"pasted": pasted}, &out); err != nil {
+		return nil, err
+	}
+
+	return &out, nil
+}
+
+// ImportEnvironmentVariables adds every variable in a .env to an environment,
+// all or none. secret names exactly the ones to keep secret; nil leaves that
+// to the control plane, which marks the names that read like credentials.
+func (c *Client) ImportEnvironmentVariables(ctx context.Context, environmentID int, pasted string, secret []string) (*VariablesImported, error) {
+	return c.importVariables(ctx, fmt.Sprintf("/environments/%d/variables/import", environmentID), pasted, secret)
+}
+
+// ImportProjectVariables is the same, for the project's own.
+func (c *Client) ImportProjectVariables(ctx context.Context, projectID int, pasted string, secret []string) (*VariablesImported, error) {
+	return c.importVariables(ctx, fmt.Sprintf("/projects/%d/variables/import", projectID), pasted, secret)
+}
+
+func (c *Client) importVariables(ctx context.Context, path, pasted string, secret []string) (*VariablesImported, error) {
+	var out VariablesImported
+
+	body := map[string]any{"pasted": pasted}
+	if secret != nil {
+		body["secret"] = secret
+	}
+
+	if err := c.post(ctx, path, body, &out); err != nil {
+		return nil, err
+	}
+
+	return &out, nil
+}
+
+// TeamPeople reads a team's members and the invitations still waiting.
+func (c *Client) TeamPeople(ctx context.Context, teamID int) (*TeamPeople, error) {
+	var out TeamPeople
+
+	if err := c.get(ctx, fmt.Sprintf("/teams/%d/people", teamID), &out); err != nil {
+		return nil, err
+	}
+
+	return &out, nil
+}
+
+// Invite asks somebody to join a team. projects narrows the role to those
+// projects; nil is every project.
+func (c *Client) Invite(ctx context.Context, teamID int, email, role string, projects []int) (*Invited, error) {
+	var out Invited
+
+	body := map[string]any{"email": email, "role": role}
+	if projects != nil {
+		body["projects"] = projects
+	} else {
+		body["scope"] = "all"
+	}
+
+	if err := c.post(ctx, fmt.Sprintf("/teams/%d/invitations", teamID), body, &out); err != nil {
+		return nil, err
+	}
+
+	return &out, nil
+}
+
+// WithdrawInvitation takes an invitation back; its link stops working.
+func (c *Client) WithdrawInvitation(ctx context.Context, invitationID int) error {
+	return c.delete(ctx, fmt.Sprintf("/invitations/%d", invitationID), nil)
+}
+
+// ChangeMembership gives a member another role. projects as for Invite.
+func (c *Client) ChangeMembership(ctx context.Context, membershipID int, role string, projects []int) (*MembershipChanged, error) {
+	var out MembershipChanged
+
+	fields := map[string]any{"role": role}
+	if projects != nil {
+		fields["projects"] = projects
+	} else {
+		fields["scope"] = "all"
+	}
+
+	body, err := json.Marshal(fields)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := c.do(ctx, http.MethodPatch, fmt.Sprintf("/memberships/%d", membershipID), body, &out); err != nil {
+		return nil, err
+	}
+
+	return &out, nil
+}
+
+// RemoveMembership takes somebody off a team, or, for one's own, leaves it.
+func (c *Client) RemoveMembership(ctx context.Context, membershipID int) error {
+	return c.delete(ctx, fmt.Sprintf("/memberships/%d", membershipID), nil)
+}
+
+// Resources reads an environment's CPU, memory and disk over a window:
+// 1h, 24h, 7d, 30d or 90d.
+func (c *Client) Resources(ctx context.Context, environmentID int, window string) (*Resources, error) {
+	var out Resources
+
+	path := fmt.Sprintf("/environments/%d/resources?window=%s", environmentID, url.QueryEscape(window))
+
+	if err := c.get(ctx, path, &out); err != nil {
+		return nil, err
+	}
+
+	return &out, nil
+}

@@ -93,6 +93,7 @@ func envCommand() *Command {
 			envInfoCommand(),
 			envCreateCommand(),
 			envSourceCommand(),
+			envMaintenanceCommand(),
 			envDeleteCommand(),
 		},
 	}
