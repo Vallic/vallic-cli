@@ -513,6 +513,7 @@ which go to wherever the project sends them and never to the control plane.`,
 		Children: []*Command{
 			activityListCommand(),
 			activityLogCommand(),
+			activityCancelCommand(),
 			{
 				Name:    "get",
 				Summary: "show one task",
@@ -564,6 +565,55 @@ which go to wherever the project sends them and never to the control plane.`,
 					return env.Printer.Print(table, map[string]any{"task": task})
 				},
 			},
+		},
+	}
+}
+
+// activityCancelCommand cancels a task before it starts.
+//
+// Upsun's activity:cancel, with the platform's narrower answer: only work no
+// machine has claimed yet can be called off. A deploy half way through has
+// already changed something, and stopping it would leave that half in place,
+// so the control plane refuses and says it had started.
+func activityCancelCommand() *Command {
+	return &Command{
+		Name:    "cancel",
+		Summary: "call off a task that has not started",
+		Usage:   "activity cancel <id>",
+		Long: `Cancels queued work — a deploy waiting behind another, a backup not yet
+picked up — by the id ` + "`vallic activity list`" + ` prints. Work a machine has
+already started is not stopped: it runs to the end, and this says so.`,
+		Run: func(ctx context.Context, env *Env, args []string) error {
+			if len(args) == 0 {
+				return Usagef(nil, "name a task id, as `vallic activity list` shows it")
+			}
+
+			if err := ensureNoExtra(nil, args, 1); err != nil {
+				return err
+			}
+
+			id, err := atoi(args[0])
+			if err != nil {
+				return Usagef(nil, "%q is not a task id", args[0])
+			}
+
+			client, err := env.Client()
+			if err != nil {
+				return err
+			}
+
+			cancelled, err := client.CancelTask(ctx, id)
+			if err != nil {
+				return err
+			}
+
+			if env.Printer.Structured() {
+				return env.Printer.Value(map[string]any{"task": cancelled.Task})
+			}
+
+			env.Printer.Good("%s", firstNonEmpty(cancelled.Message, fmt.Sprintf("Task #%d is cancelled.", id)))
+
+			return nil
 		},
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -28,6 +29,8 @@ const (
 	typeGo        = "go"
 	typePython    = "python"
 	typeDjango    = "django"
+	typeRuby      = "ruby"
+	typeRust      = "rust"
 )
 
 // initCommand writes a starting vallic.yaml.
@@ -52,7 +55,7 @@ func initCommand() *Command {
 	return &Command{
 		Name:    "init",
 		Summary: "write a starting vallic.yaml for this checkout",
-		Usage:   "init [--type drupal|laravel|wordpress|php|nodejs|go|python|django] [--force]",
+		Usage:   "init [--type drupal|laravel|wordpress|php|nodejs|go|rust|python|django|ruby] [--force]",
 		Long: `Writes vallic.yaml in the working directory, and nothing else. It
 needs no credential and reaches nothing, so it works in a checkout of a
 project that does not exist on the platform yet.
@@ -60,9 +63,10 @@ project that does not exist on the platform yet.
 What kind of project this is comes from the files here: a composer.json
 requiring drupal/core is Drupal, laravel/framework is Laravel, a WordPress
 core package or a wp-config.php is WordPress, a composer.json on its own is
-PHP, go.mod is Go, manage.py or a dependency on Django is Django, a uv.lock,
-pyproject.toml or requirements.txt is otherwise Python, and package.json is
-Node. The command says which file decided it, and --type overrides the
+PHP, go.mod is Go, Cargo.toml is Rust, manage.py or a dependency on Django is
+Django, a uv.lock, pyproject.toml or requirements.txt is otherwise Python, a
+Gemfile is Ruby, and package.json is Node — run on Bun where a bun.lock sits
+beside it. The command says which file decided it, and --type overrides the
 answer.
 
 The kind is worth getting right rather than settling for the generic one: it
@@ -182,6 +186,11 @@ type starter struct {
 	Build  []string
 	Deploy []string
 
+	// Cache is what the build keeps between builds, as the control plane's
+	// ManifestSuggestion::cachePaths() names it for the same kind. Written
+	// only beside a build, since it is a key of the build.
+	Cache []string
+
 	// Start is what serves the application, for a runtime that is its own
 	// server.
 	Start string
@@ -240,22 +249,75 @@ func detectProject(dir string) (kind, because string, err error) {
 		return typeGo, "go.mod", nil
 	}
 
+	if _, readErr := os.Stat(filepath.Join(dir, "Cargo.toml")); readErr == nil {
+		return typeRust, "Cargo.toml", nil
+	}
+
 	// Before package.json, for the reason composer.json is first: a Django
 	// site builds its front end with npm and is not a Node project.
 	if kind, because := detectPython(dir); kind != "" {
 		return kind, because, nil
 	}
 
+	// Before package.json too: a Rails application bundling its JavaScript
+	// with jsbundling-rails carries one.
+	if because := detectRuby(dir); because != "" {
+		return typeRuby, because, nil
+	}
+
 	if _, readErr := os.Stat(filepath.Join(dir, "package.json")); readErr == nil {
+		// Still Node: Bun is a runtime of the nodejs type, chosen under
+		// `runtime` and not by the type. Named, because it changes every
+		// step the file writes.
+		if lock := bunLockfile(dir); lock != "" {
+			return typeNode, "package.json, with " + lock + " beside it, so on Bun", nil
+		}
+
 		return typeNode, "package.json", nil
 	}
 
 	// A usage error rather than a failure: the fix is an argument, and the
 	// help printed with it lists the kinds that work.
 	return "", "", Usagef(nil,
-		"nothing here says what this project is: no composer.json, wp-config.php, go.mod, pyproject.toml, requirements.txt or package.json\n"+
-			"  name it: vallic init --type drupal|laravel|wordpress|php|nodejs|go|python|django",
+		"nothing here says what this project is: no composer.json, wp-config.php, go.mod, Cargo.toml, pyproject.toml, requirements.txt, Gemfile or package.json\n"+
+			"  name it: vallic init --type drupal|laravel|wordpress|php|nodejs|go|rust|python|django|ruby",
 	)
+}
+
+// detectRuby recognises a Ruby project, and says whether it is Rails.
+//
+// One type for both, as on the control plane, where Ruby is Rails's type and
+// any other Rack application runs on it unchanged. Rails is still worth
+// naming in the reason: it is what decides the asset and migration steps.
+func detectRuby(dir string) (because string) {
+	raw, err := os.ReadFile(filepath.Join(dir, "Gemfile"))
+	if err != nil {
+		return ""
+	}
+
+	if lock, err := os.ReadFile(filepath.Join(dir, "Gemfile.lock")); err == nil && rubyRequires(lock, "rails") {
+		return "Gemfile.lock, which requires Rails"
+	}
+
+	if rubyRequires(raw, "rails") {
+		return "Gemfile, which requires Rails"
+	}
+
+	return "Gemfile"
+}
+
+// bunLockfile is the Bun lockfile in dir, or empty where there is none.
+//
+// Text since Bun 1.2 and binary before it; the control plane looks for both
+// when it asks whether a Bun build was declared.
+func bunLockfile(dir string) string {
+	for _, name := range []string{"bun.lock", "bun.lockb"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return name
+		}
+	}
+
+	return ""
 }
 
 // The files a Python project declares its dependencies in, the most exact
@@ -293,11 +355,11 @@ func detectPython(dir string) (kind, because string) {
 // knownProjectType refuses a --type this writes no file for.
 func knownProjectType(kind string) error {
 	switch kind {
-	case typeDrupal, typeLaravel, typeWordPress, typePHP, typeNode, typeGo, typePython, typeDjango:
+	case typeDrupal, typeLaravel, typeWordPress, typePHP, typeNode, typeGo, typeRust, typePython, typeDjango, typeRuby:
 		return nil
 	}
 
-	return Usagef(nil, "--type takes drupal, laravel, wordpress, php, nodejs, go, python or django, not %q", kind)
+	return Usagef(nil, "--type takes drupal, laravel, wordpress, php, nodejs, go, rust, python, django or ruby, not %q", kind)
 }
 
 // starterFor builds the starting file for one kind of project.
@@ -307,8 +369,12 @@ func starterFor(kind, dir string) *starter {
 		return nodeStarter(dir)
 	case typeGo:
 		return goStarter(dir)
+	case typeRust:
+		return rustStarter(dir)
 	case typePython, typeDjango:
 		return pythonStarter(kind, dir)
+	case typeRuby:
+		return rubyStarter(dir)
 	default:
 		return phpStarter(kind, dir)
 	}
@@ -335,7 +401,22 @@ func phpStarter(kind, dir string) *starter {
 		// declared is a deploy the control plane stops, naming the command it
 		// expected to find here.
 		Build:    []string{"composer install --no-dev --optimize-autoloader"},
+		Cache:    []string{"vendor"},
 		Services: []string{"mariadb: '11.8'"},
+	}
+
+	// Everything the install writes, not just vendor/: composer puts Drupal
+	// core and contrib under web/, and a build that cached vendor alone still
+	// extracted all of core into an empty web/core on every push.
+	if kind == typeDrupal {
+		manifest.Cache = []string{
+			"vendor",
+			"web/core",
+			"web/modules/contrib",
+			"web/themes/contrib",
+			"web/profiles/contrib",
+			"web/libraries",
+		}
 	}
 
 	// What brings a release up to date with the code in it. Each is the
@@ -367,6 +448,7 @@ func phpStarter(kind, dir string) *starter {
 		// wrong. `composer install` with no composer.json fails the build, and
 		// it fails it at the point where there is nothing to roll back to.
 		manifest.Build = nil
+		manifest.Cache = nil
 		manifest.Notes = append(manifest.Notes,
 			"no composer.json here, so no build step is written and the repository is deployed as it is")
 	}
@@ -380,6 +462,10 @@ func phpStarter(kind, dir string) *starter {
 func nodeStarter(dir string) *starter {
 	raw, readErr := os.ReadFile(filepath.Join(dir, "package.json"))
 
+	if bunLockfile(dir) != "" {
+		return bunStarter(raw, readErr)
+	}
+
 	manifest := &starter{
 		Type:       typeNode,
 		VersionKey: "node",
@@ -389,12 +475,17 @@ func nodeStarter(dir string) *starter {
 		// with nothing in the file to say that it did.
 		Version:  firstVersion(packageEngine(raw, "node"), 1),
 		Build:    []string{"npm ci"},
+		Cache:    []string{"node_modules"},
 		Services: []string{"postgres: '18'"},
 	}
 
 	if hasScript(raw, "build") {
 		manifest.Build = append(manifest.Build, "npm run build")
 	}
+
+	// node_modules is the runtime, not a build input, and travels in the
+	// release, so the last step leaves only what production needs.
+	manifest.Build = append(manifest.Build, "npm prune --omit=dev")
 
 	// Left out of the file rather than guessed at. The image runs `npm start`
 	// where nothing says otherwise, and inventing an entry point here would
@@ -409,6 +500,74 @@ func nodeStarter(dir string) *starter {
 	manifest.noteUnpinned(readErr == nil, "node", "package.json")
 
 	return manifest
+}
+
+// bunStarter is a Node application run by Bun, in Node's place.
+//
+// The same type, port and node_modules as Node, with Bun as the runtime and
+// the package manager. What says so is `bun:` under runtime rather than
+// `node:`, so it is written whether or not a version is known: without the
+// key the project would build and run on Node.
+func bunStarter(raw []byte, readErr error) *starter {
+	manifest := &starter{
+		Type:       typeNode,
+		VersionKey: "bun",
+		// Two components. The Bun images are tagged `1.4.3-slim-1`, and the
+		// catalogue matches a manifest's `1.4` on that line.
+		Version: firstVersion(firstNonEmpty(packageEngine(raw, "bun"), packageManagerVersion(raw, "bun")), 2),
+		Build:   []string{"bun install --frozen-lockfile"},
+		Cache:   []string{"node_modules"},
+		// postgres because Bun.sql reads the DATABASE_URL the platform sets
+		// for it, with nothing to configure.
+		Services: []string{"postgres: '18'"},
+	}
+
+	if hasScript(raw, "build") {
+		manifest.Build = append(manifest.Build, "bun run build")
+	}
+
+	// Bun has no prune. The production install is made again, from Bun's own
+	// download cache, into a node_modules with nothing else in it.
+	manifest.Build = append(manifest.Build, "rm -rf node_modules && bun install --frozen-lockfile --production")
+
+	if readErr == nil && !hasScript(raw, "start") {
+		manifest.Notes = append(manifest.Notes,
+			"package.json has no start script, so add a start: line naming what serves the application, such as bun index.ts")
+	}
+
+	// The one runtime written without the repository stating it, because a
+	// key with no version is not asking for Bun at all: the control plane
+	// would build on Node. The major is the one every Bun lockfile is
+	// written by, and it matches whichever 1.x the platform offers.
+	if manifest.Version == "" {
+		manifest.Version = "1"
+		manifest.Notes = append(manifest.Notes,
+			"nothing here states a Bun version — engines.bun or packageManager in package.json — so runtime names Bun 1, which is what chooses Bun over Node; pin the minor you test with")
+	}
+
+	return manifest
+}
+
+// packageManagerVersion reads the version a package.json's packageManager
+// field pins for one tool: `bun@1.4.3` is 1.4.3 for bun.
+func packageManagerVersion(raw []byte, tool string) string {
+	var file struct {
+		PackageManager string `json:"packageManager"`
+	}
+
+	if err := json.Unmarshal(raw, &file); err != nil {
+		return ""
+	}
+
+	name, version, found := strings.Cut(file.PackageManager, "@")
+	if !found || name != tool {
+		return ""
+	}
+
+	// Corepack appends a hash, `bun@1.4.3+sha512.…`.
+	version, _, _ = strings.Cut(version, "+")
+
+	return version
 }
 
 // goStarter is a compiled Go binary, which serves its own HTTP too.
@@ -441,6 +600,174 @@ func goStarter(dir string) *starter {
 	return manifest
 }
 
+// rustStarter is a compiled Rust binary, which serves its own HTTP like Go's.
+//
+// cargo installs it into the release's bin/, which is on PATH, and the image
+// starts bin/server. Nothing is cached: cargo's registry and build directory
+// are kept by the platform outside the checkout, and target/ declared as a
+// cache would be copied into every release.
+func rustStarter(dir string) *starter {
+	raw, readErr := os.ReadFile(filepath.Join(dir, "Cargo.toml"))
+
+	manifest := &starter{
+		Type:       typeRust,
+		VersionKey: "rust",
+		Version:    rustVersion(dir),
+		Build:      []string{"cargo install --locked --path . --root ."},
+		Services:   []string{"postgres: '18'"},
+	}
+
+	// --locked builds what Cargo.lock says, and with no Cargo.lock there is
+	// nothing to hold it to. The same bargain as uv without its lock.
+	if _, err := os.Stat(filepath.Join(dir, "Cargo.lock")); err != nil {
+		manifest.Build = []string{"cargo install --path . --root ."}
+		manifest.Notes = append(manifest.Notes,
+			"no Cargo.lock here, so every build resolves the dependencies again: run cargo generate-lockfile, commit it, and add --locked")
+	}
+
+	// The binary is named after the package, or its [[bin]]: written out
+	// rather than left to the image's bin/server, because a package called
+	// anything else serves nothing.
+	switch binaries := rustBinaries(dir, raw); len(binaries) {
+	case 0:
+		manifest.Notes = append(manifest.Notes,
+			"Cargo.toml here builds no binary — a workspace, or a library — so check which package the build step names and add a start: line")
+	case 1:
+		manifest.Start = "bin/" + binaries[0]
+	default:
+		manifest.Notes = append(manifest.Notes, fmt.Sprintf(
+			"Cargo.toml builds %s, so add a start: line naming the one that serves, as bin/<name>",
+			strings.Join(binaries, ", "),
+		))
+	}
+
+	if manifest.Version == "" && readErr == nil {
+		manifest.Notes = append(manifest.Notes,
+			"nothing here states a Rust version — channel in rust-toolchain.toml — so none is pinned and the platform's default runs")
+	}
+
+	return manifest
+}
+
+// rustVersion is the toolchain the repository builds with.
+//
+// rust-toolchain.toml's channel, or the older rust-toolchain file, which the
+// platform's build does not obey: the version it builds with is the one under
+// runtime, so this is where that file's answer has to go. A channel such as
+// stable or nightly names no version and pins nothing. Cargo.toml's
+// rust-version is not read: it is the oldest the crate supports, and the
+// platform offers the newest two.
+func rustVersion(dir string) string {
+	if raw, err := os.ReadFile(filepath.Join(dir, "rust-toolchain.toml")); err == nil {
+		if channel := tomlValue(raw, "toolchain", "channel"); startsWithDigit(channel) {
+			return firstVersion(channel, 2)
+		}
+
+		return ""
+	}
+
+	if raw, err := os.ReadFile(filepath.Join(dir, "rust-toolchain")); err == nil {
+		line, _, _ := strings.Cut(strings.TrimSpace(string(raw)), "\n")
+
+		if channel := strings.TrimSpace(line); startsWithDigit(channel) {
+			return firstVersion(channel, 2)
+		}
+	}
+
+	return ""
+}
+
+// rustBinaries names what `cargo install` puts in bin/.
+//
+// Each [[bin]], the package itself where src/main.rs exists, and each file
+// under src/bin/, which cargo builds without being told.
+func rustBinaries(dir string, raw []byte) []string {
+	var names []string
+
+	add := func(name string) {
+		if name != "" && !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+
+	for _, name := range tomlTables(raw, "[bin]", "name") {
+		add(name)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "src", "main.rs")); err == nil {
+		add(tomlValue(raw, "package", "name"))
+	}
+
+	if entries, err := os.ReadDir(filepath.Join(dir, "src", "bin")); err == nil {
+		for _, entry := range entries {
+			switch {
+			case !entry.IsDir() && strings.HasSuffix(entry.Name(), ".rs"):
+				add(strings.TrimSuffix(entry.Name(), ".rs"))
+			case entry.IsDir():
+				if _, err := os.Stat(filepath.Join(dir, "src", "bin", entry.Name(), "main.rs")); err == nil {
+					add(entry.Name())
+				}
+			}
+		}
+	}
+
+	return names
+}
+
+// tomlValue reads one string out of one table of a TOML file.
+//
+// Enough of TOML for the two files read here, which keep the values asked
+// about as `key = "value"` under a plain [table] header, and no more: this is
+// a starting file, and a value this cannot find is said rather than guessed.
+func tomlValue(raw []byte, table, key string) string {
+	values := tomlTables(raw, table, key)
+	if len(values) == 0 {
+		return ""
+	}
+
+	return values[0]
+}
+
+// tomlTables reads a key out of every table with a header, in order: once
+// for [package], once per entry of an array of tables such as [[bin]].
+//
+// The table is named as its header is written, without the outer brackets:
+// `package` for [package], `[bin]` for [[bin]].
+func tomlTables(raw []byte, table, key string) []string {
+	var (
+		values  []string
+		current string
+	)
+
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+
+		if strings.HasPrefix(line, "[") {
+			header, _, _ := strings.Cut(line, "#")
+			current = strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(header), "["), "]")
+			continue
+		}
+
+		if current != table {
+			continue
+		}
+
+		name, value, found := strings.Cut(line, "=")
+		if !found || strings.TrimSpace(name) != key {
+			continue
+		}
+
+		value, _, _ = strings.Cut(strings.TrimSpace(value), "#")
+		values = append(values, strings.Trim(strings.TrimSpace(value), `"'`))
+	}
+
+	return values
+}
+
+func startsWithDigit(s string) bool {
+	return s != "" && s[0] >= '0' && s[0] <= '9'
+}
+
 // pythonStarter is a Python application, Django or not, which serves its own
 // HTTP through Gunicorn.
 //
@@ -465,14 +792,18 @@ func pythonStarter(kind, dir string) *starter {
 	// Whatever the repository locks with. uv with its lock, so a build
 	// installs exactly what was tested; pip where requirements.txt is what
 	// the project keeps; uv without a lock, resolving afresh, for a
-	// pyproject.toml alone.
+	// pyproject.toml alone. Each keeps .venv between builds, so the next one
+	// only brings it up to date.
 	switch {
 	case exists("uv.lock"):
 		manifest.Build = []string{"uv sync --locked --no-dev --no-editable"}
+		manifest.Cache = []string{".venv"}
 	case exists("requirements.txt"):
 		manifest.Build = []string{"python -m venv .venv", ".venv/bin/pip install -r requirements.txt"}
+		manifest.Cache = []string{".venv"}
 	case exists("pyproject.toml"):
 		manifest.Build = []string{"uv sync --no-dev --no-editable"}
+		manifest.Cache = []string{".venv"}
 		manifest.Notes = append(manifest.Notes,
 			"no uv.lock here, so every build resolves the dependencies again: run uv lock, commit it, and add --locked")
 	default:
@@ -519,6 +850,202 @@ func pythonStarter(kind, dir string) *starter {
 	}
 
 	return manifest
+}
+
+// rubyStarter is a Ruby application served by Puma from its release: Rails,
+// or Sinatra, Hanami or any other Rack application.
+//
+// The bundle is installed into the checkout's vendor/bundle, held to
+// Gemfile.lock and without the development and test groups — the image's own
+// Bundler settings, so `bundle install` is the whole of the step — and travels
+// in the release as node_modules does. With no start: line the image runs
+// `bundle exec puma -p $PORT`, which reads config/puma.rb.
+func rubyStarter(dir string) *starter {
+	gemfile, gemfileErr := os.ReadFile(filepath.Join(dir, "Gemfile"))
+	lock, lockErr := os.ReadFile(filepath.Join(dir, "Gemfile.lock"))
+
+	manifest := &starter{
+		Type:       typeRuby,
+		VersionKey: "ruby",
+		Version:    rubyVersion(dir, gemfile, lock),
+		Build:      []string{"bundle install"},
+		Cache:      []string{"vendor/bundle"},
+		Services:   []string{"postgres: '18'"},
+	}
+
+	requires := func(name string) bool {
+		return rubyRequires(lock, name) || rubyRequires(gemfile, name)
+	}
+
+	exists := func(name string) bool {
+		_, err := os.Stat(filepath.Join(dir, name))
+
+		return err == nil
+	}
+
+	switch {
+	case gemfileErr != nil:
+		// Only through --type: a checkout with no Gemfile is not detected
+		// as Ruby. `bundle install` with nothing to install fails the build.
+		manifest.Build, manifest.Cache = nil, nil
+		manifest.Notes = append(manifest.Notes,
+			"no Gemfile here, so no build step is written and the repository is deployed as it is")
+	case lockErr != nil:
+		// The image installs held to the lock, so a build with none fails
+		// rather than resolving afresh.
+		manifest.Notes = append(manifest.Notes,
+			"no Gemfile.lock here, and the build installs only what it locks: run bundle install and commit Gemfile.lock")
+	default:
+		if platforms := gemPlatforms(lock); len(platforms) > 0 && !slices.ContainsFunc(platforms, func(p string) bool {
+			return p == "ruby" || strings.Contains(p, "linux")
+		}) {
+			// A lock made on a Mac names the Mac alone, and an install held
+			// to it refuses to add the platform it is building on.
+			manifest.Notes = append(manifest.Notes, fmt.Sprintf(
+				"Gemfile.lock is locked for %s only, and the build runs on Linux: bundle lock --add-platform x86_64-linux",
+				strings.Join(platforms, ", "),
+			))
+		}
+	}
+
+	if manifest.Version == "" {
+		manifest.Notes = append(manifest.Notes,
+			"nothing here states a Ruby version — .ruby-version, or ruby in the Gemfile — so none is pinned and the platform's default runs")
+	}
+
+	if !requires("puma") {
+		manifest.Notes = append(manifest.Notes,
+			"the image serves with Puma, which the Gemfile does not name: add gem \"puma\", or a start: line naming what serves the application")
+	}
+
+	if !requires("rails") {
+		if !exists("config.ru") {
+			manifest.Notes = append(manifest.Notes,
+				"no config.ru here, which is what Puma serves: add one, or a start: line naming what serves the application")
+		}
+
+		return manifest
+	}
+
+	// Compiled in the build, which can write, and served by Rails from the
+	// release. A build is given no environment, and SECRET_KEY_BASE_DUMMY is
+	// what lets Rails 7.1 and later boot for it without the key. Only with
+	// an asset pipeline in the bundle: an API application has no
+	// assets:precompile, and the step would fail the build.
+	if requires("propshaft") || requires("sprockets-rails") || requires("sprockets") {
+		manifest.Build = append(manifest.Build, "SECRET_KEY_BASE_DUMMY=1 bin/rails assets:precompile")
+
+		for _, bundler := range []string{"jsbundling-rails", "cssbundling-rails"} {
+			if requires(bundler) {
+				manifest.Notes = append(manifest.Notes,
+					bundler+" builds with Node, which the Ruby image does not have: name node under services and build in its image before assets:precompile, as the Rails guide shows")
+
+				break
+			}
+		}
+	} else {
+		manifest.Notes = append(manifest.Notes,
+			"no asset pipeline in the Gemfile — Propshaft or Sprockets — so no assets:precompile step is written")
+	}
+
+	// db:prepare, not db:migrate: it creates the schema on the empty database
+	// of a first release, which is when the control plane runs deploy steps
+	// for Ruby, and migrates every release after.
+	manifest.Deploy = []string{"'bin/rails db:prepare'"}
+
+	return manifest
+}
+
+// rubyVersion is the Ruby the repository says it runs on.
+//
+// .ruby-version first, which rbenv, chruby and Rails's own generator write;
+// then the Gemfile's `ruby` line; then the version Gemfile.lock was resolved
+// with. The image's Ruby is the one that runs whatever these say, so a version
+// one of them names is a version runtime has to be told. Two components:
+// the images are tagged `4.0.7-slim-trixie-1`, and the catalogue matches
+// `4.0` on that line.
+func rubyVersion(dir string, gemfile, lock []byte) string {
+	if raw, err := os.ReadFile(filepath.Join(dir, ".ruby-version")); err == nil {
+		line, _, _ := strings.Cut(strings.TrimSpace(string(raw)), "\n")
+
+		if version := firstVersion(line, 2); strings.Contains(version, ".") {
+			return version
+		}
+	}
+
+	for _, line := range strings.Split(string(gemfile), "\n") {
+		line, _, _ = strings.Cut(strings.TrimSpace(line), "#")
+
+		// `ruby "3.4.1"` and `ruby '~> 3.4'`, but not `ruby file:
+		// ".ruby-version"`, which names a file read above.
+		if rest, found := strings.CutPrefix(line, "ruby "); found && !strings.Contains(rest, "file:") {
+			if version := firstVersion(rest, 2); strings.Contains(version, ".") {
+				return version
+			}
+		}
+	}
+
+	// RUBY VERSION, then `   ruby 3.4.1p194` on the line after it.
+	if _, after, found := strings.Cut(string(lock), "RUBY VERSION\n"); found {
+		line, _, _ := strings.Cut(after, "\n")
+
+		if version := firstVersion(line, 2); strings.Contains(version, ".") {
+			return version
+		}
+	}
+
+	return ""
+}
+
+// rubyRequires reports whether a Gemfile or Gemfile.lock names a gem.
+//
+// A Gemfile names one as `gem "rails", "~> 8.1"`, a lock as `    rails
+// (8.1.0)` among its specs and `  rails (~> 8.1)` among its dependencies:
+// in both, the name is the first word of the line, quoted in a Gemfile.
+func rubyRequires(raw []byte, name string) bool {
+	for _, line := range strings.Split(string(raw), "\n") {
+		line, _, _ = strings.Cut(strings.TrimSpace(line), "#")
+
+		if rest, found := strings.CutPrefix(line, "gem "); found {
+			rest = strings.TrimSpace(rest)
+
+			if len(rest) > 1 && (rest[0] == '"' || rest[0] == '\'') {
+				if gem, _, closed := strings.Cut(rest[1:], rest[:1]); closed && gem == name {
+					return true
+				}
+			}
+
+			continue
+		}
+
+		word := strings.FieldsFunc(line, func(r rune) bool { return r == ' ' || r == '(' || r == '!' })
+		if len(word) > 0 && word[0] == name {
+			return true
+		}
+	}
+
+	return false
+}
+
+// gemPlatforms are the platforms a Gemfile.lock was resolved for.
+func gemPlatforms(lock []byte) []string {
+	_, after, found := strings.Cut(string(lock), "PLATFORMS\n")
+	if !found {
+		return nil
+	}
+
+	var platforms []string
+
+	for _, line := range strings.Split(after, "\n") {
+		// The section ends at the first line that is not indented under it.
+		if !strings.HasPrefix(line, " ") {
+			break
+		}
+
+		platforms = append(platforms, strings.TrimSpace(line))
+	}
+
+	return platforms
 }
 
 // The settings module manage.py names, as startproject writes it.
@@ -696,6 +1223,16 @@ func renderStarter(s *starter) string {
 
 		for _, step := range s.Build {
 			fmt.Fprintf(&b, "    - %s\n", step)
+		}
+
+		// Declared whole from the first build: the paths describe one
+		// install between them, and adding one later starts the set again.
+		if len(s.Cache) > 0 {
+			b.WriteString("  cache:\n")
+
+			for _, path := range s.Cache {
+				fmt.Fprintf(&b, "    - %s\n", path)
+			}
 		}
 	}
 

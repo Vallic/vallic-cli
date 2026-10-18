@@ -188,6 +188,14 @@ type SSHTarget struct {
 	DBImport string `json:"db_import"`
 	DBCLI    string `json:"db_cli"`
 
+	// DBSize is the verb that reports the database's size, and
+	// DBExportOptions what DBExport takes after its name: `--table` and the
+	// rest. Empty where the machines' agent is older than the shell that
+	// reads them, and against a control plane that predates both, so a client
+	// asks for neither where it would be refused.
+	DBSize          string   `json:"db_size"`
+	DBExportOptions []string `json:"db_export_options"`
+
 	// FilesPath is the one writable directory that is the same for every
 	// project type and survives every deploy. What rsync should be aimed at.
 	FilesPath string `json:"files_path"`
@@ -1052,6 +1060,10 @@ type Manifest struct {
 	// platform did not write. Declared in the manifest, defined by a compose
 	// fragment the control plane does not echo and this does not ask for.
 	Extras []ManifestExtra `json:"extras"`
+
+	// BackupExclude is what the files backup leaves out beside the
+	// framework's own caches, as the file wrote it.
+	BackupExclude []string `json:"backup_exclude"`
 }
 
 // ManifestService is one service a repository asked to run beside it.
@@ -1376,4 +1388,170 @@ type LogDestination struct {
 	Kind      string `json:"kind"`
 	KindLabel string `json:"kind_label"`
 	Name      string `json:"name"`
+}
+
+// TaskCancelled is the answer to a cancel.
+type TaskCancelled struct {
+	Task struct {
+		ID    int    `json:"id"`
+		State string `json:"state"`
+	} `json:"task"`
+
+	Message string `json:"message"`
+}
+
+// SSHKey is one public key on a person's account. Never the key itself: the
+// fingerprint is what somebody compares against `ssh-keygen -lf`.
+type SSHKey struct {
+	ID          int    `json:"id"`
+	Label       string `json:"label"`
+	Type        string `json:"type"`
+	Bits        *int   `json:"bits"`
+	Fingerprint string `json:"fingerprint"`
+	Comment     string `json:"comment"`
+
+	// LastUsed is an ISO 8601 time, or nil for a key never used to log in.
+	LastUsed *string `json:"last_used"`
+}
+
+// SSHKeyAdded is the answer to adding a key, with the control plane's own
+// sentence naming its fingerprint.
+type SSHKeyAdded struct {
+	Key     SSHKey `json:"ssh_key"`
+	Message string `json:"message"`
+}
+
+// CDN is an environment's CDN settings, as the edge has them now.
+//
+// Read from the pull zone rather than from a copy here, so this is what the
+// edge is doing. Only the values: the options and limits beside them are the
+// console's form's, and a client that printed them would be printing a form.
+type CDN struct {
+	Values struct {
+		Dynamic bool `json:"dynamic"`
+
+		// The browser cache times in seconds, or nil where the site's own
+		// headers decide.
+		BrowserCachePages *int `json:"browser_cache_pages"`
+		BrowserCacheFiles *int `json:"browser_cache_files"`
+
+		Vary           []string `json:"vary"`
+		Cookies        []string `json:"cookies"`
+		Headers        []string `json:"headers"`
+		Blocked        []string `json:"blocked"`
+		SkipPaths      []string `json:"skip_paths"`
+		SessionCookies []string `json:"session_cookies"`
+	} `json:"values"`
+}
+
+// Said is an answer that is a sentence and nothing else worth reading.
+type Said struct {
+	Message string `json:"message"`
+}
+
+// Maintenance is whether an environment is behind its offline page.
+type Maintenance struct {
+	Maintenance bool   `json:"maintenance"`
+	Note        string `json:"note"`
+	Message     string `json:"message"`
+}
+
+// ParsedVariable is one line of a .env, as the control plane read it.
+type ParsedVariable struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+
+	// Secret is the control plane's guess from the name, which an import
+	// follows unless told which ones are.
+	Secret bool `json:"secret"`
+}
+
+// ParsedVariables is what a .env would import, before it does.
+type ParsedVariables struct {
+	Variables []ParsedVariable `json:"variables"`
+	Summary   string           `json:"summary"`
+}
+
+// VariablesImported is the answer to an import, which adds all or none.
+type VariablesImported struct {
+	Imported    int    `json:"imported"`
+	TakesEffect string `json:"takes_effect"`
+	Message     string `json:"message"`
+}
+
+// TeamPeople is a team's roster.
+//
+// Invitations and Roles are empty for somebody who may not invite: a viewer
+// sees who is in the team and nothing about who is about to join it.
+type TeamPeople struct {
+	Members     []TeamMember     `json:"members"`
+	Invitations []TeamInvitation `json:"invitations"`
+	Roles       []struct {
+		Value       string `json:"value"`
+		Label       string `json:"label"`
+		Description string `json:"description"`
+		Scoped      bool   `json:"scoped"`
+	} `json:"roles"`
+	Projects []struct {
+		ID    int    `json:"id"`
+		Label string `json:"label"`
+	} `json:"projects"`
+}
+
+// TeamMember is one membership.
+type TeamMember struct {
+	ID   int `json:"id"`
+	User struct {
+		ID    int     `json:"id"`
+		Name  string  `json:"name"`
+		Email *string `json:"email"`
+	} `json:"user"`
+	Role string `json:"role"`
+
+	// Projects are the ids the role is narrowed to; empty is every project.
+	Projects []int `json:"projects"`
+	IsSelf   bool  `json:"is_self"`
+}
+
+// TeamInvitation is an invitation still waiting, without its link.
+type TeamInvitation struct {
+	ID       int    `json:"id"`
+	Email    string `json:"email"`
+	Role     string `json:"role"`
+	Projects []int  `json:"projects"`
+	State    string `json:"state"`
+	Created  int64  `json:"created"`
+	Expires  int64  `json:"expires"`
+}
+
+// Invited is a new invitation, with the one copy of its link there will ever
+// be: only its digest is kept, and no mail is sent.
+type Invited struct {
+	Invitation TeamInvitation `json:"invitation"`
+	Link       string         `json:"link"`
+}
+
+// MembershipChanged is the answer to a change of role.
+type MembershipChanged struct {
+	Membership TeamMember `json:"membership"`
+	Message    string     `json:"message"`
+}
+
+// Resources is an environment's CPU, memory and disk over a window.
+type Resources struct {
+	Environment string          `json:"environment"`
+	Window      string          `json:"window"`
+	Step        int             `json:"step"`
+	Points      []ResourcePoint `json:"points"`
+}
+
+// ResourcePoint is one step's average.
+type ResourcePoint struct {
+	Taken       int64   `json:"taken"`
+	CPUPercent  float64 `json:"cpu_percent"`
+	MemoryBytes float64 `json:"memory_bytes"`
+
+	// DiskBytes is nil for a step with no disk reading, which is a gap and
+	// not an empty disk.
+	DiskBytes *float64 `json:"disk_bytes"`
 }

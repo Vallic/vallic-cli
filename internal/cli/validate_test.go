@@ -108,6 +108,7 @@ func TestManifestEntriesLeaveOutWhatWasNotRead(t *testing.T) {
 				HealthTimeout:     30,
 				RequiredEnv:       []string{"STRIPE_KEY"},
 				Mounts:            []string{"public/files"},
+				BackupExclude:     []string{"web/sites/default/files/backup_migrate", "private/exports/*.csv"},
 			},
 			want: []manifestEntry{
 				{Key: "type", Value: "drupal"},
@@ -122,6 +123,7 @@ func TestManifestEntriesLeaveOutWhatWasNotRead(t *testing.T) {
 				{Key: "health", Value: "/up, 30s"},
 				{Key: "required env", Value: "STRIPE_KEY"},
 				{Key: "mounts", Value: "public/files"},
+				{Key: "backup exclude", Value: "web/sites/default/files/backup_migrate, private/exports/*.csv"},
 			},
 		},
 		{

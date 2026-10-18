@@ -341,16 +341,16 @@ func (f *fakeClient) Environments(context.Context) ([]api.Environment, error) {
 // A project is offered by its label as well as its machine name.
 //
 // The name alone is what this printed, and a machine name is generated:
-// `brogxu30`, `egmcbg18`. A list of five of them asks somebody to pick their own
+// `abcdef12`, `ghijkl34`. A list of five of them asks somebody to pick their own
 // project out of five strings that mean nothing, when the label they gave it is
 // on the same response the candidates were built from.
 func TestProjectCandidatesCarryTheirLabels(t *testing.T) {
 	got := projectNames([]api.Project{
-		{MachineName: "brogxu30", Label: "Auctioneer"},
-		{MachineName: "egmcbg18", Label: "Forum.tm"},
+		{MachineName: "abcdef12", Label: "Blog"},
+		{MachineName: "ghijkl34", Label: "Shop"},
 	})
 
-	want := []string{"brogxu30 (Auctioneer)", "egmcbg18 (Forum.tm)"}
+	want := []string{"abcdef12 (Blog)", "ghijkl34 (Shop)"}
 
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("projectNames = %v, want %v", got, want)

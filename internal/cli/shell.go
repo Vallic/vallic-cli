@@ -20,19 +20,27 @@ func identityFlag(fs *flag.FlagSet, into *string) {
 
 // target resolves an environment and builds a connection to it.
 func (e *Env) sshTarget(ctx context.Context, positional, identity string) (*vssh.Target, error) {
+	target, _, err := e.sshTargetFor(ctx, positional, identity)
+
+	return target, err
+}
+
+// sshTargetFor is sshTarget, keeping the project and environment it resolved
+// for a command that names something after them.
+func (e *Env) sshTargetFor(ctx context.Context, positional, identity string) (*vssh.Target, *Target, error) {
 	resolved, err := e.ResolveEnvironment(ctx, positional)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	detail, err := e.Detail(ctx, resolved)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	target, err := vssh.New(detail, identity)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if !target.HasKeys {
@@ -42,10 +50,10 @@ func (e *Env) sshTarget(ctx context.Context, positional, identity string) (*vssh
 		// fix is beats letting sshd answer with "Permission denied
 		// (publickey)".
 		cfg, _ := e.Config()
-		e.Printer.Warn("you have no SSH key on file; add one at %s", keysPage(cfg.API))
+		e.Printer.Warn("you have no SSH key on file; add one with `vallic ssh-key add`, or at %s", keysPage(cfg.API))
 	}
 
-	return target, nil
+	return target, resolved, nil
 }
 
 // sshCommand opens a shell, or runs one command.
@@ -191,8 +199,13 @@ func splitDrush(env *Env, args []string) (positional string, remote []string) {
 
 // dbCommand moves a database in or out.
 func dbCommand() *Command {
-	var identity string
-	var dryRun bool
+	var (
+		identity string
+		dryRun   bool
+		gzipped  bool
+		file     string
+		part     dumpPart
+	)
 
 	flags := func(fs *flag.FlagSet) {
 		identityFlag(fs, &identity)
@@ -205,40 +218,87 @@ func dbCommand() *Command {
 		Long: `Both directions stream, so size is not a limit and neither is a
 request timeout.
 
+    vallic db dump production          a file, named for the project and environment
+    vallic db export production > f    a stream, for a pipeline
+    vallic db import staging -f f      a file or a stream, gzip or not
+
 What runs on the far side is a verb, not a command: the agent expands
 db-export and db-import inside the container into the engine's own client —
 mysqldump or pg_dump, mysql or psql — with credentials that come from the
 container's environment and never appear on a command line. Which engine it
 is is decided in the container, not guessed from here.`,
 		Children: []*Command{
+			dbDumpCommand(),
+			dbSizeCommand(),
 			{
 				Name:    "export",
 				Summary: "stream a dump out, to stdout",
-				Usage:   "db export [<env>] > dump.sql",
-				Flags:   flags,
+				Usage:   "db export [<env>] [--gzip] [--table <t>]... [--exclude-table <t>]... [--schema-only] > dump.sql",
+				Long: `The dump on standard output, for a redirect or a pipe. Refused onto a
+terminal, where it would scroll past and be gone: ` + "`vallic db dump`" + ` writes a
+file named for it instead.
+
+--gzip compresses it on the way out. --table, --exclude-table and
+--schema-only take part of the database, as db dump's do.`,
+				Flags: func(fs *flag.FlagSet) {
+					flags(fs)
+					fs.BoolVar(&gzipped, "gzip", false, "compress the dump")
+					fs.BoolVar(&gzipped, "z", false, "compress the dump")
+					part.flags(fs)
+				},
 				Run: func(ctx context.Context, env *Env, args []string) error {
+					if err := ensureNoExtra(nil, args, 1); err != nil {
+						return err
+					}
+
+					if err := part.check(); err != nil {
+						return err
+					}
+
 					target, err := env.sshTarget(ctx, first(args), identity)
 					if err != nil {
 						return err
 					}
 
-					if target.DBExport == "" {
-						return fmt.Errorf("this environment runs no database")
+					verb, err := part.verb(target)
+					if err != nil {
+						return err
 					}
 
-					// To stderr, because stdout is the dump. A progress line
-					// in the middle of a redirect would corrupt the file.
-					env.Printer.Say("Streaming %s out of %s…", "the database", target.Host)
+					target.Compress = true
 
-					return runOrPrint(env, target.Verb(target.DBExport, false), dryRun)
+					return streamDump(env, target.Verb(verb, false), gzipped, dryRun, target.Host)
 				},
 			},
 			{
 				Name:    "import",
-				Summary: "stream a dump in, from stdin",
-				Usage:   "db import [<env>] < dump.sql",
-				Flags:   flags,
+				Summary: "stream a dump in, from a file or stdin",
+				Usage:   "db import [<env>] [--file <dump>] < dump.sql",
+				Long: `Reads the dump from --file (-f), or from standard input. A gzip dump is
+decompressed on the way in, whichever it came from, so what db dump --gzip
+wrote goes straight back:
+
+    vallic db import staging -f acme--production--dump.sql.gz
+    vallic db import staging < production.sql
+
+It is read into the environment's database as it is, over what is there.`,
+				Flags: func(fs *flag.FlagSet) {
+					flags(fs)
+					fs.StringVar(&file, "file", "", "the dump to read, instead of standard input")
+					fs.StringVar(&file, "f", "", "the dump to read")
+				},
 				Run: func(ctx context.Context, env *Env, args []string) error {
+					if err := ensureNoExtra(nil, args, 1); err != nil {
+						return err
+					}
+
+					if file == "" && env.stdinIsTerminal() {
+						// stdin is the terminal, which means no redirect was
+						// given and this would sit waiting for somebody to
+						// type a database. Better to say so than to hang.
+						return Usagef(nil, "nothing to import: name a dump with --file, or redirect one in, as `vallic db import < dump.sql`")
+					}
+
 					target, err := env.sshTarget(ctx, first(args), identity)
 					if err != nil {
 						return err
@@ -248,39 +308,77 @@ is is decided in the container, not guessed from here.`,
 						return fmt.Errorf("this environment runs no database")
 					}
 
-					if env.Interactive() {
-						// stdin is the terminal, which means no redirect was
-						// given and this would sit waiting for somebody to
-						// type a database. Better to say so than to hang.
-						return Usagef(nil, "nothing to import: redirect a dump into this command, as `vallic db import < dump.sql`")
+					process := target.Verb(target.DBImport, false)
+
+					if dryRun {
+						// By the name, since the dump is not opened for a dry
+						// run: the bytes decide on a real one.
+						switch {
+						case strings.HasSuffix(file, ".gz"):
+							env.Printer.Line("gunzip -c %s | %s", vssh.Quote(file), vssh.Describe(process))
+						case file != "":
+							env.Printer.Line("%s < %s", vssh.Describe(process), vssh.Quote(file))
+						default:
+							env.Printer.Line("%s", vssh.Describe(process))
+						}
+
+						return nil
 					}
 
-					return runOrPrint(env, target.Verb(target.DBImport, false), dryRun)
+					input, described, closer, err := openDump(env, file)
+					if err != nil {
+						return err
+					}
+					defer closer()
+
+					process.Stdin = input
+
+					env.Printer.Say("Reading %s into the database on %s…", described, target.Host)
+
+					return runOrPrint(env, process, false)
 				},
 			},
 		},
 	}
 }
 
-// sqlCommand is a database prompt.
+// sqlCommand is a database prompt, or one query.
 func sqlCommand() *Command {
 	var identity string
 	var dryRun bool
 
 	return &Command{
 		Name:    "sql",
-		Summary: "open a database prompt in an environment",
-		Usage:   "sql [<env>]",
+		Summary: "open a database prompt in an environment, or run a query",
+		Usage:   "sql [<env>] [-- <query>]",
 		Long: `A prompt inside the container, not a local port.
 
 What you get is the engine's own client, running beside the site, reading its
 credentials from the container's environment. For a desktop client on a local
-port instead, see vallic tunnel.`,
+port instead, see vallic tunnel.
+
+After -- it runs that query and prints what the client answers, and with input
+redirected it runs what it reads:
+
+    vallic sql production -- 'SELECT COUNT(*) FROM users'
+    vallic sql staging < fix.sql`,
 		Flags: func(fs *flag.FlagSet) {
 			identityFlag(fs, &identity)
 			fs.BoolVar(&dryRun, "dry-run", false, "print the ssh command instead of running it")
 		},
 		Run: func(ctx context.Context, env *Env, args []string) error {
+			if len(args) > 1 {
+				// Most often a query typed without the separator, which is
+				// the one thing that tells it from an environment's name.
+				return Usagef(nil, "unexpected argument %q; a query goes after --, as `vallic sql %s -- 'SELECT 1'`", args[1], args[0])
+			}
+
+			query, hasQuery := env.Passthrough()
+
+			if hasQuery && len(query) == 0 {
+				return Usagef(nil, "nothing after --: name the query, as `vallic sql -- 'SELECT 1'`")
+			}
+
 			target, err := env.sshTarget(ctx, first(args), identity)
 			if err != nil {
 				return err
@@ -294,10 +392,34 @@ port instead, see vallic tunnel.`,
 				return fmt.Errorf("this environment runs no database")
 			}
 
-			// A terminal, because this is a prompt: the forced command asks
-			// sshd for a pty and that is what makes the client interactive
-			// rather than something that reads stdin and exits.
-			return runOrPrint(env, target.Verb(target.DBCLI, true), dryRun)
+			switch {
+			case hasQuery:
+				// The verb is a fixed word and takes no arguments, so the
+				// query goes in the way a file would: on the client's input,
+				// with no terminal, where both clients run what they read and
+				// print the answer.
+				process := target.Verb(target.DBCLI, false)
+				joined := strings.Join(query, " ")
+
+				if dryRun {
+					env.Printer.Line("printf '%%s\\n' %s | %s", vssh.Quote(joined), vssh.Describe(process))
+
+					return nil
+				}
+
+				process.Stdin = strings.NewReader(joined + "\n")
+
+				return runOrPrint(env, process, false)
+			case !env.stdinIsTerminal():
+				// Input redirected: the same, from whatever was given.
+				return runOrPrint(env, target.Verb(target.DBCLI, false), dryRun)
+			default:
+				// A terminal, because this is a prompt: the forced command
+				// asks sshd for a pty and that is what makes the client
+				// interactive rather than something that reads stdin and
+				// exits.
+				return runOrPrint(env, target.Verb(target.DBCLI, true), dryRun)
+			}
 		},
 	}
 }

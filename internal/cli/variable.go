@@ -5,6 +5,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"slices"
+	"strings"
 
 	"github.com/vallic/vallic-cli/internal/api"
 	"github.com/vallic/vallic-cli/internal/output"
@@ -45,6 +48,7 @@ environment that does not override it.`,
 			varGetCommand(),
 			varSetCommand(),
 			varDeleteCommand(),
+			varImportCommand(),
 			varApplyCommand(),
 		},
 	}
@@ -636,4 +640,192 @@ func takesEffect(answer string) string {
 	}
 
 	return answer
+}
+
+// varImportCommand adds every variable in a .env, all or none.
+//
+// The console's bulk paste, from a file: the same parser reads it, the same
+// guess marks the names that read like credentials as secret, and a name
+// already defined refuses the whole import rather than half of it.
+func varImportCommand() *Command {
+	var (
+		scope   string
+		secrets namesFlag
+		dryRun  bool
+	)
+
+	return &Command{
+		Name:    "import",
+		Summary: "add every variable in a .env file, all or none",
+		Usage:   "var import <file> [<env>] [--scope project] [--secret <a,b>] [--dry-run]",
+		Long: `Reads a .env — NAME=value lines, quoted or not, comments and export
+allowed — and adds each one. It adds and never replaces: a name already set
+here refuses the import, and nothing from the file is added.
+
+Names that read like credentials — PASSWORD, TOKEN, SECRET, KEY and the like —
+are stored as secrets. --secret names exactly which ones are instead, and
+--secret '' makes none of them secret.
+
+--dry-run prints what the file would add, and which as secrets, and adds
+nothing. A file of - is read from standard input.
+
+As with var set, a running site sees them after the next deploy, or now with
+var apply.`,
+		Flags: func(fs *flag.FlagSet) {
+			scopeFlag(&scope)(fs)
+			fs.Var(&secrets, "secret", "exactly the names to store as secrets, comma separated")
+			fs.BoolVar(&dryRun, "dry-run", false, "print what would be added, and add nothing")
+		},
+		Run: func(ctx context.Context, env *Env, args []string) error {
+			if len(args) == 0 {
+				return Usagef(nil, "name a .env file, or - for standard input")
+			}
+
+			chosen, err := variableScope(scope)
+			if err != nil {
+				return err
+			}
+
+			taken := 2
+			if chosen == scopeProject {
+				taken = 1
+			}
+
+			if err := ensureNoExtra(nil, args, taken); err != nil {
+				return err
+			}
+
+			pasted, err := readDotEnv(env, args[0])
+			if err != nil {
+				return err
+			}
+
+			client, err := env.Client()
+			if err != nil {
+				return err
+			}
+
+			if dryRun {
+				parsed, err := client.ParseVariables(ctx, pasted)
+				if err != nil {
+					return err
+				}
+
+				if secrets.given {
+					for i := range parsed.Variables {
+						parsed.Variables[i].Secret = slices.Contains(secrets.names, parsed.Variables[i].Name)
+					}
+				}
+
+				if env.Printer.Structured() {
+					return env.Printer.Value(map[string]any{"variables": parsed.Variables})
+				}
+
+				table := output.Table{
+					Columns: []string{"name", "secret", "value"},
+					Empty:   "The file holds no variables.",
+				}
+
+				for _, variable := range parsed.Variables {
+					value := variable.Value
+					if variable.Secret {
+						// Not printed: the point of a dry run is to check the
+						// file, and a secret on a screen is a secret shared.
+						value = "(hidden)"
+					}
+
+					table.Rows = append(table.Rows, []string{variable.Name, yesNo(variable.Secret), value})
+				}
+
+				return env.Printer.Print(table, nil)
+			}
+
+			var secret []string
+			if secrets.given {
+				secret = append([]string{}, secrets.names...)
+			}
+
+			var imported *api.VariablesImported
+
+			if chosen == scopeProject {
+				project, resolveErr := env.ResolveProject(ctx)
+				if resolveErr != nil {
+					return resolveErr
+				}
+
+				imported, err = client.ImportProjectVariables(ctx, project.ID, pasted, secret)
+			} else {
+				target, resolveErr := env.ResolveEnvironment(ctx, firstOf(args[1:]))
+				if resolveErr != nil {
+					return resolveErr
+				}
+
+				imported, err = client.ImportEnvironmentVariables(ctx, target.Environment.ID, pasted, secret)
+			}
+
+			if err != nil {
+				return err
+			}
+
+			if env.Printer.Structured() {
+				return env.Printer.Value(imported)
+			}
+
+			env.Printer.Good("%s", firstNonEmpty(imported.Message, fmt.Sprintf("Added %d variables.", imported.Imported)))
+			env.Printer.Say("  they take effect at the next deploy, or now with: vallic var apply")
+
+			return nil
+		},
+	}
+}
+
+// readDotEnv reads the file to import, or standard input for -.
+func readDotEnv(env *Env, path string) (string, error) {
+	var (
+		raw []byte
+		err error
+	)
+
+	if path == "-" {
+		if env.stdinIsTerminal() {
+			return "", Usagef(nil, "nothing to read: redirect a .env in, as `vallic var import - < .env`")
+		}
+
+		raw, err = io.ReadAll(env.In)
+	} else {
+		raw, err = os.ReadFile(path)
+	}
+
+	if err != nil {
+		return "", fmt.Errorf("cannot read %s: %w", path, err)
+	}
+
+	if strings.TrimSpace(string(raw)) == "" {
+		return "", fmt.Errorf("%s is empty", path)
+	}
+
+	return string(raw), nil
+}
+
+// namesFlag is a comma-separated list that knows whether it was given at all,
+// so an empty --secret, none of them, is told from no flag, the guess.
+type namesFlag struct {
+	names []string
+	given bool
+}
+
+func (n *namesFlag) String() string {
+	return strings.Join(n.names, ",")
+}
+
+func (n *namesFlag) Set(value string) error {
+	n.given = true
+
+	for _, name := range strings.Split(value, ",") {
+		if name = strings.TrimSpace(name); name != "" && !slices.Contains(n.names, name) {
+			n.names = append(n.names, name)
+		}
+	}
+
+	return nil
 }

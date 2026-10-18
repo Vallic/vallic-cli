@@ -112,6 +112,34 @@ func TestDetectProjectReadsTheFilesInTheCheckout(t *testing.T) {
 			},
 			want: typeGo,
 		},
+		{
+			name: "a rust service with a front end beside it",
+			files: map[string]string{
+				"Cargo.toml":   "[package]\nname = \"server\"\n",
+				"package.json": `{"scripts":{"build":"vite build"}}`,
+			},
+			want: typeRust,
+		},
+		{
+			name: "a rails application bundling its javascript",
+			files: map[string]string{
+				"Gemfile":      "gem \"rails\", \"~> 8.1\"\n",
+				"Gemfile.lock": "GEM\n  specs:\n    rails (8.1.0)\n",
+				"package.json": `{"scripts":{"build":"esbuild app/javascript/*.*"}}`,
+			},
+			want: typeRuby,
+		},
+		{
+			name:  "a rack application, which is ruby too",
+			files: map[string]string{"Gemfile": "source \"https://rubygems.org\"\ngem \"sinatra\"\n"},
+			want:  typeRuby,
+		},
+		{
+			// Bun is a runtime of the nodejs type, not a type of its own.
+			name:  "node on bun",
+			files: map[string]string{"package.json": `{}`, "bun.lock": "{}"},
+			want:  typeNode,
+		},
 	}
 
 	for _, c := range cases {
@@ -214,6 +242,55 @@ func TestStarterPinsOnlyWhatTheRepositoryStates(t *testing.T) {
 			wantsNote: true,
 		},
 		{
+			name: "rust, from the toolchain the repository builds with",
+			kind: typeRust,
+			files: map[string]string{
+				"Cargo.toml":          "[package]\nname = \"server\"\nrust-version = \"1.80\"\n",
+				"rust-toolchain.toml": "[toolchain]\nchannel = \"1.98.1\"\ncomponents = [\"clippy\"]\n",
+			},
+			key:  "rust",
+			want: "1.98",
+		},
+		{
+			// rust-version is the oldest the crate supports, which the
+			// platform does not offer: pinning it would run the default
+			// while the file said otherwise.
+			name:      "rust on a channel, which names no version",
+			kind:      typeRust,
+			files:     map[string]string{"Cargo.toml": "[package]\nname = \"server\"\nrust-version = \"1.80\"\n", "rust-toolchain.toml": "[toolchain]\nchannel = \"stable\"\n"},
+			key:       "rust",
+			want:      "",
+			wantsNote: true,
+		},
+		{
+			name:  "ruby, from .ruby-version as rbenv writes it",
+			kind:  typeRuby,
+			files: map[string]string{".ruby-version": "ruby-3.4.2\n", "Gemfile": "ruby \"3.3.0\"\n"},
+			key:   "ruby",
+			want:  "3.4",
+		},
+		{
+			name:  "ruby, from the version the lock was resolved with",
+			kind:  typeRuby,
+			files: map[string]string{"Gemfile": "gem \"puma\"\n", "Gemfile.lock": "GEM\n  specs:\n\nRUBY VERSION\n   ruby 4.0.7p0\n"},
+			key:   "ruby",
+			want:  "4.0",
+		},
+		{
+			name:  "bun, from engines, under its own key",
+			kind:  typeNode,
+			files: map[string]string{"package.json": `{"engines":{"bun":">=1.4.3"}}`, "bun.lock": "{}"},
+			key:   "bun",
+			want:  "1.4",
+		},
+		{
+			name:  "bun, from the version corepack pins",
+			kind:  typeNode,
+			files: map[string]string{"package.json": `{"packageManager":"bun@1.3.14+sha512.0123"}`, "bun.lockb": ""},
+			key:   "bun",
+			want:  "1.3",
+		},
+		{
 			name:      "nothing at all, which is said out loud",
 			kind:      typePHP,
 			files:     map[string]string{"composer.json": `{"require":{"monolog/monolog":"^3"}}`},
@@ -278,20 +355,26 @@ var manifestKeys = map[string]bool{
 	"version": true, "type": true, "runtime": true, "services": true,
 	"cron": true, "workers": true, "build": true, "deploy": true,
 	"health": true, "env": true, "mounts": true, "start": true, "port": true,
+	"extra": true, "backup": true,
 }
 
 func TestStarterUsesOnlyKeysTheControlPlaneUnderstands(t *testing.T) {
-	for _, kind := range []string{typeDrupal, typePHP, typeNode, typeGo, typePython, typeDjango} {
+	for _, kind := range []string{typeDrupal, typePHP, typeNode, typeGo, typeRust, typePython, typeDjango, typeRuby} {
 		t.Run(kind, func(t *testing.T) {
 			rendered := renderStarter(starterFor(kind, checkoutWith(t, map[string]string{
 				"composer.json":      `{"require":{"php":"^8.4","drupal/core":"^11"}}`,
 				"package.json":       `{"engines":{"node":"24"},"scripts":{"build":"next build","start":"next start"}}`,
 				"go.mod":             "module example.com/api\n\ngo 1.27\n",
+				"Cargo.toml":         "[package]\nname = \"server\"\n",
+				"Cargo.lock":         "version = 4\n",
+				"src/main.rs":        "fn main() {}\n",
 				"pyproject.toml":     "[project]\nrequires-python = \">=3.14\"\n",
 				"uv.lock":            "version = 1\n",
 				"manage.py":          `os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")`,
 				"mysite/wsgi.py":     "",
 				"mysite/settings.py": "STATIC_ROOT = BASE_DIR / 'staticfiles'\n",
+				"Gemfile":            "gem \"rails\"\ngem \"propshaft\"\ngem \"puma\"\n",
+				"Gemfile.lock":       "PLATFORMS\n  x86_64-linux\n\nRUBY VERSION\n   ruby 4.0.7p0\n",
 			})))
 
 			for _, line := range strings.Split(rendered, "\n") {
@@ -623,5 +706,229 @@ func TestDjangoStarterServesTheProjectManagePyNames(t *testing.T) {
 	}))
 	if ambiguous != "" {
 		t.Errorf("djangoProject() = %q from two candidates, want none picked", ambiguous)
+	}
+}
+
+// The image starts bin/server and cargo names the binary after its package,
+// so a package called anything else serves nothing unless the file says what
+// to start. Several binaries, or none at the root, are the repository's to
+// choose between.
+func TestRustStarterStartsTheBinaryCargoInstalls(t *testing.T) {
+	cases := []struct {
+		name      string
+		files     map[string]string
+		start     string
+		wantsNote string
+	}{
+		{
+			name:  "the package's own binary",
+			files: map[string]string{"Cargo.toml": "[package]\nname = \"shop-api\"\n", "src/main.rs": "", "Cargo.lock": ""},
+			start: "bin/shop-api",
+		},
+		{
+			name:  "a [[bin]] named for itself",
+			files: map[string]string{"Cargo.toml": "[package]\nname = \"shop\"\n\n[[bin]] # the only one\nname = \"server\"\npath = \"src/server.rs\"\n", "Cargo.lock": ""},
+			start: "bin/server",
+		},
+		{
+			name: "several, which are the repository's to choose between",
+			files: map[string]string{
+				"Cargo.toml":             "[package]\nname = \"shop\"\n",
+				"src/main.rs":            "",
+				"src/bin/migrate.rs":     "",
+				"src/bin/worker/main.rs": "",
+				"Cargo.lock":             "",
+			},
+			wantsNote: "shop, migrate, worker",
+		},
+		{
+			name:      "a workspace, with nothing to build at the root",
+			files:     map[string]string{"Cargo.toml": "[workspace]\nmembers = [\"api\", \"core\"]\n", "Cargo.lock": ""},
+			wantsNote: "builds no binary",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := starterFor(typeRust, checkoutWith(t, c.files))
+
+			if got.Start != c.start {
+				t.Errorf("Start = %q, want %q", got.Start, c.start)
+			}
+
+			if c.wantsNote != "" && !strings.Contains(strings.Join(got.Notes, "\n"), c.wantsNote) {
+				t.Errorf("Notes = %q, want one mentioning %q", got.Notes, c.wantsNote)
+			}
+
+			// target/ under the cache would be copied into every release,
+			// and cargo's own caches are kept by the platform.
+			if len(got.Cache) != 0 {
+				t.Errorf("Cache = %v, want nothing for Rust", got.Cache)
+			}
+		})
+	}
+
+	// --locked with no Cargo.lock has nothing to hold the build to.
+	unlocked := starterFor(typeRust, checkoutWith(t, map[string]string{"Cargo.toml": "[package]\nname = \"server\"\n", "src/main.rs": ""}))
+
+	if strings.Contains(strings.Join(unlocked.Build, " "), "--locked") {
+		t.Errorf("Build = %v with no Cargo.lock, want no --locked", unlocked.Build)
+	}
+
+	if !strings.Contains(strings.Join(unlocked.Notes, "\n"), "Cargo.lock") {
+		t.Errorf("Notes = %q, want one asking for Cargo.lock to be committed", unlocked.Notes)
+	}
+}
+
+// Rails's build and deploy, and only what the bundle supports: an API
+// application has no assets:precompile to run, and db:prepare is what makes
+// the schema on the empty database of a first release.
+func TestRailsStarterCompilesAssetsAndPreparesTheDatabase(t *testing.T) {
+	lock := "GEM\n  remote: https://rubygems.org/\n  specs:\n    propshaft (1.2.0)\n    puma (6.6.0)\n    rails (8.1.0)\n      railties (= 8.1.0)\n\nPLATFORMS\n  arm64-darwin-24\n  x86_64-linux\n\nDEPENDENCIES\n  propshaft\n  puma\n  rails (~> 8.1)\n"
+
+	got := starterFor(typeRuby, checkoutWith(t, map[string]string{
+		"Gemfile":       "gem \"rails\", \"~> 8.1\"\ngem \"propshaft\"\ngem \"puma\"\n",
+		"Gemfile.lock":  lock,
+		"config.ru":     "",
+		".ruby-version": "4.0.7\n",
+	}))
+
+	if want := []string{"bundle install", "SECRET_KEY_BASE_DUMMY=1 bin/rails assets:precompile"}; strings.Join(got.Build, " | ") != strings.Join(want, " | ") {
+		t.Errorf("Build = %q, want %q", got.Build, want)
+	}
+
+	if len(got.Deploy) != 1 || !strings.Contains(got.Deploy[0], "bin/rails db:prepare") {
+		t.Errorf("Deploy = %v, want db:prepare", got.Deploy)
+	}
+
+	if strings.Join(got.Cache, " ") != "vendor/bundle" {
+		t.Errorf("Cache = %v, want the bundle the release carries", got.Cache)
+	}
+
+	// Puma serves from the release with no start: line written.
+	if got.Start != "" {
+		t.Errorf("Start = %q, want none: the image runs Puma", got.Start)
+	}
+
+	// Locked for Linux as well as the Mac, so nothing to say about it.
+	if len(got.Notes) != 0 {
+		t.Errorf("Notes = %q, want none for a Rails application that has everything", got.Notes)
+	}
+
+	api := starterFor(typeRuby, checkoutWith(t, map[string]string{
+		"Gemfile":      "gem \"rails\"\ngem \"puma\"\n",
+		"Gemfile.lock": "GEM\n  specs:\n    puma (6.6.0)\n    rails (8.1.0)\n\nPLATFORMS\n  arm64-darwin-24\n",
+	}))
+
+	if strings.Contains(strings.Join(api.Build, " "), "assets:precompile") {
+		t.Errorf("Build = %v, want no assets step without Propshaft or Sprockets", api.Build)
+	}
+
+	notes := strings.Join(api.Notes, "\n")
+
+	for _, want := range []string{"no asset pipeline", "bundle lock --add-platform x86_64-linux", "arm64-darwin-24"} {
+		if !strings.Contains(notes, want) {
+			t.Errorf("Notes = %q, want one mentioning %q", api.Notes, want)
+		}
+	}
+}
+
+// A Rack application that is not Rails gets the bundle and nothing else, and
+// is told what Puma needs to serve it.
+func TestRackStarterSaysWhatPumaNeeds(t *testing.T) {
+	got := starterFor(typeRuby, checkoutWith(t, map[string]string{"Gemfile": "gem 'sinatra'\n"}))
+
+	if strings.Join(got.Build, " | ") != "bundle install" || len(got.Deploy) != 0 {
+		t.Errorf("Build = %q, Deploy = %q, want the bundle and no deploy step", got.Build, got.Deploy)
+	}
+
+	notes := strings.Join(got.Notes, "\n")
+
+	for _, want := range []string{"Gemfile.lock", "Puma", "config.ru"} {
+		if !strings.Contains(notes, want) {
+			t.Errorf("Notes = %q, want one mentioning %q", got.Notes, want)
+		}
+	}
+}
+
+// Bun is chosen by its key under runtime, so the key is written even where
+// nothing states a version: without it the control plane builds on Node.
+func TestBunStarterChoosesBunUnderRuntime(t *testing.T) {
+	got := starterFor(typeNode, checkoutWith(t, map[string]string{
+		"package.json": `{"scripts":{"build":"bun build ./index.ts --outdir dist","start":"bun dist/index.js"}}`,
+		"bun.lock":     "{}",
+	}))
+
+	if got.Type != typeNode || got.VersionKey != "bun" {
+		t.Errorf("Type = %q, VersionKey = %q, want nodejs on bun", got.Type, got.VersionKey)
+	}
+
+	if got.Version != "1" || !strings.Contains(strings.Join(got.Notes, "\n"), "Bun 1") {
+		t.Errorf("Version = %q, Notes = %q, want Bun's major and a note saying why", got.Version, got.Notes)
+	}
+
+	want := []string{
+		"bun install --frozen-lockfile",
+		"bun run build",
+		"rm -rf node_modules && bun install --frozen-lockfile --production",
+	}
+
+	if strings.Join(got.Build, " | ") != strings.Join(want, " | ") {
+		t.Errorf("Build = %q, want %q", got.Build, want)
+	}
+
+	if !strings.Contains(renderStarter(got), "runtime:\n  bun: '1'\n") {
+		t.Errorf("rendered without the key that chooses Bun:\n%s", renderStarter(got))
+	}
+}
+
+// node_modules travels in the release, so a Node build ends by leaving only
+// what production needs — the step the control plane's own suggestion ends on.
+func TestNodeStarterLeavesOnlyProductionDependencies(t *testing.T) {
+	got := starterFor(typeNode, checkoutWith(t, map[string]string{
+		"package.json": `{"scripts":{"build":"next build","start":"next start"}}`,
+	}))
+
+	want := []string{"npm ci", "npm run build", "npm prune --omit=dev"}
+
+	if strings.Join(got.Build, " | ") != strings.Join(want, " | ") {
+		t.Errorf("Build = %q, want %q", got.Build, want)
+	}
+}
+
+// The caches are the control plane's ManifestSuggestion::cachePaths(), and
+// they are written under the build they belong to.
+func TestStarterCachesWhatTheBuildInstalls(t *testing.T) {
+	cases := []struct {
+		kind  string
+		files map[string]string
+		want  []string
+	}{
+		{typeDrupal, map[string]string{"composer.json": `{"require":{"drupal/core":"^11"}}`}, []string{"vendor", "web/core", "web/modules/contrib", "web/themes/contrib", "web/profiles/contrib", "web/libraries"}},
+		{typeLaravel, map[string]string{"composer.json": `{}`}, []string{"vendor"}},
+		{typeWordPress, map[string]string{"wp-config.php": "<?php"}, nil},
+		{typeNode, map[string]string{"package.json": `{}`}, []string{"node_modules"}},
+		{typePython, map[string]string{"requirements.txt": "flask\n"}, []string{".venv"}},
+		{typeRuby, map[string]string{"Gemfile": "gem \"puma\"\n"}, []string{"vendor/bundle"}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.kind, func(t *testing.T) {
+			got := starterFor(c.kind, checkoutWith(t, c.files))
+
+			if strings.Join(got.Cache, " ") != strings.Join(c.want, " ") {
+				t.Errorf("Cache = %v, want %v", got.Cache, c.want)
+			}
+
+			rendered := renderStarter(got)
+
+			if len(c.want) > 0 && !strings.Contains(rendered, "  cache:\n    - "+c.want[0]+"\n") {
+				t.Errorf("no cache under the build:\n%s", rendered)
+			}
+
+			if len(c.want) == 0 && strings.Contains(rendered, "cache:") {
+				t.Errorf("a cache with no build to keep it for:\n%s", rendered)
+			}
+		})
 	}
 }

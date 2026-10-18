@@ -15,6 +15,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -111,6 +112,15 @@ func Execute(ctx context.Context, root *Command, env *Env, args []string) error 
 			break
 		}
 
+		// Upsun's and Platform.sh's spelling, `db:dump`, read as the two
+		// words it stands for. At the top only, where theirs start, and only
+		// for a word no command here is called.
+		if len(path) == 1 && strings.Contains(args[0], ":") && cmd.lookup(args[0]) == nil {
+			if words, ok := colonSpelling(cmd, args[0]); ok {
+				args = append(words, args[1:]...)
+			}
+		}
+
 		child := cmd.lookup(args[0])
 		if child == nil {
 			// Named rather than silently treated as an argument: a typo in a
@@ -199,6 +209,62 @@ func Execute(ctx context.Context, root *Command, env *Env, args []string) error 
 	warnAboutExpiry(env, time.Now())
 
 	return err
+}
+
+// upsunNames are Upsun's commands that are spelled differently here, beyond
+// the colon: a prompt is `sql` rather than `db:sql`, and a team's people are
+// the team's rather than a project's users. Each maps to what does the same
+// thing; a command with no equivalent is not listed, and is refused by name
+// like any other.
+var upsunNames = map[string][]string{
+	"auth:browser-login":   {"login"},
+	"auth:api-token-login": {"login", "--token"},
+	"auth:info":            {"whoami"},
+	"auth:logout":          {"logout"},
+	"backup:get":           {"backup", "download"},
+	"db:sql":               {"sql"},
+	"environment:deploy":   {"deploy"},
+	"environment:drush":    {"drush"},
+	"environment:logs":     {"logs"},
+	"environment:redeploy": {"redeploy"},
+	"environment:ssh":      {"ssh"},
+	"environment:url":      {"url"},
+	"metrics:all":          {"metrics"},
+	"project:set-remote":   {"link"},
+	"route:list":           {"url", "--all"},
+	"tunnel:open":          {"tunnel"},
+	"tunnel:single":        {"tunnel"},
+	"user:add":             {"team", "invite"},
+	"user:delete":          {"team", "remove"},
+	"user:list":            {"team", "people"},
+	"user:update":          {"team", "role"},
+	"variable:create":      {"var", "set"},
+	"variable:update":      {"var", "set"},
+}
+
+// colonSpelling reads `noun:verb` as the words it stands for here.
+//
+// The table first, for the names that differ; then the colon as a space,
+// which is most of them — `environment:list`, `mount:upload`,
+// `backup:restore` — since the nouns are the same entities; then as a
+// hyphen, for `self:update`. Nothing matching is left as it was, so the
+// refusal names what was typed.
+func colonSpelling(root *Command, word string) ([]string, bool) {
+	if words, ok := upsunNames[strings.ToLower(word)]; ok {
+		return slices.Clone(words), true
+	}
+
+	parts := strings.Split(word, ":")
+
+	if root.lookup(parts[0]) != nil {
+		return parts, true
+	}
+
+	if joined := strings.Join(parts, "-"); root.lookup(joined) != nil {
+		return []string{joined}, true
+	}
+
+	return nil, false
 }
 
 // splitPassthrough separates the arguments at the first bare "--".

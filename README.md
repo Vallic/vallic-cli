@@ -22,8 +22,9 @@ Switching current -> releases/412
 $ vallic ssh
 vallic@acme-webshop-16-production:/var/www/html$ drush status
 
-$ vallic db export > dump.sql
-$ gunzip -c dump.sql.gz | vallic db import staging
+$ vallic db dump --gzip
+✓ Wrote acme--production--dump.sql.gz (88.4 MB)
+$ vallic db import staging -f acme--production--dump.sql.gz
 $ vallic mount download ./files
 
 $ vallic tunnel staging db
@@ -216,22 +217,27 @@ when it is left off.
 
 | | |
 |---|---|
-| `login` · `logout` · `whoami` · `team` | Signing in, and which team a credential reaches |
+| `login` · `logout` · `whoami` · `team list\|switch` | Signing in, and which team a credential reaches |
+| `team people\|invite\|role\|remove\|withdraw` | Who is in the team, inviting more, their roles |
+| `ssh-key list\|add\|delete` | The SSH keys on your account, which every shell and dump logs in with |
 | `project` · `env` · `server` · `status` | What exists |
 | `url [--all] [--open]` | The browsable address, alone on stdout. `--all` lists every name the edge routes |
 | `deploy` · `rollback` · `redeploy` · `release list` | Shipping |
-| `activity list` · `activity get` · `activity log` | What the platform has been doing, and the log of one task |
+| `activity list` · `activity get` · `activity log` · `activity cancel` | What the platform has been doing, the log of one task, and calling off one that has not started |
 | `logs` | Where the site's own request and error logs go — the project's destination and the machine's copy. Not a tail: Vallic Cloud does not keep them |
-| `ssh` · `sql` · `db` · `mount` | Getting inside |
+| `ssh` · `sql` · `db dump\|export\|import\|size` · `mount` | Getting inside. `db dump` writes a file named for the project and environment, all of it or `--table`s; `db size` shows the largest tables; `sql -- <query>` runs one query |
 | `drush` | `drush` in the container, over the same forced command `ssh --` uses |
-| `var list\|get\|set\|delete\|apply` | Variables, at either scope; `apply` restarts the site with them now |
+| `var list\|get\|set\|delete\|import\|apply` | Variables, at either scope; `import` adds a `.env`, `apply` restarts the site with them now |
 | `domain list\|add\|verify\|delete` | Hostnames, and the DNS each one needs |
 | `service list` | The stack, and the versions that go in `vallic.yaml` |
 | `backup list\|create\|download\|restore` | Copies, and putting one back |
-| `env create` · `env source` · `env delete` | Raising, repointing and removing an environment |
+| `env create` · `env source` · `env maintenance` · `env delete` | Raising, repointing, taking offline and removing an environment |
+| `cdn show\|clear` · `metrics` | What the CDN caches, and emptying it; CPU, memory and disk over a window |
 | `validate [--local]` | Checking `vallic.yaml` before you commit it |
-| `init` | Writes a starting `vallic.yaml` from what the checkout looks like |
+| `init` | Writes a starting `vallic.yaml` from what the checkout looks like: Drupal, Laravel, WordPress, PHP, Node.js (or Bun), Go, Rust, Python, Django, Ruby and Rails |
 | `link` | Records which project this checkout is, when the git remote cannot say |
+
+Upsun's and Platform.sh's spelling works too: `vallic db:dump`, `vallic environment:list` and `vallic user:add` are `db dump`, `env list` and `team invite`.
 
 Four of these are worth knowing about before you need them.
 

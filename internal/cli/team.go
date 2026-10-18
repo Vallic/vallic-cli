@@ -24,10 +24,15 @@ import (
 func teamCommand() *Command {
 	return &Command{
 		Name:    "team",
-		Summary: "show which teams this credential reaches",
+		Summary: "the teams this credential reaches, and their people",
 		Children: []*Command{
 			teamListCommand(),
 			teamSwitchCommand(),
+			teamPeopleCommand(),
+			teamInviteCommand(),
+			teamRoleCommand(),
+			teamRemoveCommand(),
+			teamWithdrawCommand(),
 		},
 	}
 }

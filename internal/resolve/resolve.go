@@ -408,7 +408,7 @@ func git(dir string, args ...string) string {
 // projectNames is the candidate list, each name with the label beside it.
 //
 // The name alone is what this printed and it is not enough to choose from. A
-// machine name is generated — `brogxu30`, `egmcbg18` — so a list of five of
+// machine name is generated — `abcdef12`, `ghijkl34` — so a list of five of
 // them asks somebody to pick their own project out of five strings that mean
 // nothing, and the answer is on the same response: the label they gave it.
 //
