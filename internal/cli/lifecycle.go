@@ -203,7 +203,15 @@ destroys the machines and keeps the backups.`,
 				}
 			}
 
-			deleted, err := client.DeleteEnvironment(ctx, target.Environment.ID)
+			// Wrapped: the machines and their data go with it, so the control
+			// plane asks for a recent sign-in first.
+			var deleted *api.EnvironmentDeleted
+			err = env.WithStepUp(ctx, func() error {
+				var callErr error
+				deleted, callErr = client.DeleteEnvironment(ctx, target.Environment.ID)
+
+				return callErr
+			})
 			if err != nil {
 				return describeDeleteFailure(err, target)
 			}

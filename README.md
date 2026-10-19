@@ -117,7 +117,7 @@ The two are not interchangeable, and the difference is worth knowing:
 | Re-provable on demand | **Yes** | No |
 | Scope | You, in every team you belong to | One team, everything you may do in it |
 
-That third row is the one that bites, for exactly one action. Restoring a backup over a protected production environment requires the person asking to prove who they are *again* — the API answers `reauthentication_required`, and the CLI re-runs the browser flow and retries. A bearer token has nothing in it to challenge, so a pipeline cannot satisfy that check. It is not meant to: a gate whose purpose is that somebody is watching should not be passable by something that is not.
+That third row is the one that bites. Some actions require the person asking to prove who they are *again* when they last signed in more than a few minutes ago: restoring a backup over a protected production environment, adding an SSH key, inviting somebody, changing a member's role, deleting an environment. The API answers `reauthentication_required`, and the CLI re-runs the browser flow and retries once. A bearer token has nothing in it to challenge, so a pipeline cannot satisfy that check. It is not meant to: a gate whose purpose is that somebody is watching should not be passable by something that is not.
 
 Deploying, rolling back and redeploying were gated the same way and are not any more. Each of them moves a pointer at code and is the thing you do *during* an incident, so a prompt arrived at the worst possible moment. A restore overwrites the database that is serving customers, which is the act the rule was always for.
 

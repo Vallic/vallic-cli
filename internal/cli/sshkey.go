@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/vallic/vallic-cli/internal/api"
 	"github.com/vallic/vallic-cli/internal/output"
 )
 
@@ -127,7 +128,15 @@ user@host. The fingerprint is printed back: compare it with
 				return err
 			}
 
-			added, err := client.AddSSHKey(ctx, label, key)
+			// Wrapped: a key opens a shell on the team's machines, so the
+			// control plane asks for a recent sign-in first.
+			var added *api.SSHKeyAdded
+			err = env.WithStepUp(ctx, func() error {
+				var callErr error
+				added, callErr = client.AddSSHKey(ctx, label, key)
+
+				return callErr
+			})
 			if err != nil {
 				return err
 			}

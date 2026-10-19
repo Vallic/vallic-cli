@@ -132,7 +132,15 @@ narrowed, and only to a role you hold yourself can you invite.`,
 				return err
 			}
 
-			invited, err := client.Invite(ctx, team.ID, args[0], role, ids)
+			// Wrapped: an invitation lets somebody into the team, so the
+			// control plane asks for a recent sign-in first.
+			var invited *api.Invited
+			err = env.WithStepUp(ctx, func() error {
+				var callErr error
+				invited, callErr = client.Invite(ctx, team.ID, args[0], role, ids)
+
+				return callErr
+			})
 			if err != nil {
 				return err
 			}
@@ -189,7 +197,14 @@ role reaches every project.`,
 				return err
 			}
 
-			changed, err := client.ChangeMembership(ctx, member.ID, args[1], ids)
+			// Wrapped, for the same reason as an invitation.
+			var changed *api.MembershipChanged
+			err = env.WithStepUp(ctx, func() error {
+				var callErr error
+				changed, callErr = client.ChangeMembership(ctx, member.ID, args[1], ids)
+
+				return callErr
+			})
 			if err != nil {
 				return err
 			}

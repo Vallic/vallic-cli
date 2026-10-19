@@ -312,12 +312,13 @@ func (e *Env) AuthClient() (*auth.Client, error) {
 // that can answer is one obtained by authenticating in a browser, where the
 // second factor lives.
 //
-// One action: restoring a backup over a protected production environment.
-// Deploying, rolling back and redeploying were gated the same way until
-// 2026-09-20 and are not any more, because each of them moves a pointer at
-// code and is the thing you do *during* an incident. A restore overwrites the
-// database that is serving customers, which is the act the rule was always
-// really for.
+// The actions are the control plane's to name: restoring a backup over a
+// protected production environment, and the acts somebody holding only a
+// stolen session would reach for first — adding an SSH key, inviting
+// somebody, changing a member's role, deleting an environment. Deploying,
+// rolling back and redeploying were gated until 2026-09-20 and are not any
+// more, because each of them moves a pointer at code and is the thing you do
+// *during* an incident.
 //
 // Kept general rather than folded into the restore command: what it does is
 // answer a challenge, and which actions challenge is the control plane's to
@@ -355,8 +356,7 @@ func (e *Env) WithStepUp(ctx context.Context, action func() error) error {
 	if !e.Interactive() {
 		return fmt.Errorf(
 			"%w\n  this has to be confirmed, and there is no terminal to ask on.\n"+
-				"  a restore over a protected environment is one a person asks for,\n"+
-				"  not a pipeline.",
+				"  it is one a person asks for, not a pipeline.",
 			err,
 		)
 	}
