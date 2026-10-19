@@ -35,6 +35,13 @@ type Client struct {
 	// logs, which is how "every failure is from one old version" becomes a
 	// question somebody can answer.
 	UserAgent string
+
+	// SignIn answers a team that signs in through its identity provider. The
+	// control plane refuses a member's requests with `sso_required` until
+	// they have signed in there lately, in a browser, and says where. Set, it
+	// is asked once per request: nil means the person has signed in, and the
+	// request is sent once more. Unset, the refusal is the answer.
+	SignIn func(ctx context.Context, refusal *Error) error
 }
 
 // New builds a client.
@@ -113,6 +120,12 @@ const (
 	// with no build machine yet. 409 rather than 400 because nothing about the
 	// request was wrong and a retry once the cause is fixed is exactly right.
 	CodeNotBuildable = "not_buildable"
+
+	// CodeSSORequired is a team that signs in through its identity provider:
+	// the person's own sign-in is good, and the team also wants them to have
+	// signed in at its provider lately, in a browser. Refused before anything
+	// is done, so the same request can be sent again once they have.
+	CodeSSORequired = "sso_required"
 
 	// CodeRateLimited is one token asking too often -- 600 requests a minute,
 	// counted per token rather than per person, so a runaway CI job does not
@@ -232,7 +245,29 @@ func (c *Client) getPublic(ctx context.Context, path string, out any) error {
 }
 
 // send performs the request. optionalAuth tolerates having no credential.
+//
+// A team's identity provider asking first is answered here rather than by
+// each command: the gate refuses whatever the person's request is about, and
+// it refuses before anything is done, so sending the request again is safe.
 func (c *Client) send(ctx context.Context, method, path string, body []byte, out any, optionalAuth bool) error {
+	err := c.attempt(ctx, method, path, body, out, optionalAuth)
+
+	var refusal *Error
+	if c.SignIn == nil || !errors.As(err, &refusal) || refusal.Code != CodeSSORequired {
+		return err
+	}
+
+	if signErr := c.SignIn(ctx, refusal); signErr != nil {
+		return signErr
+	}
+
+	// Once more, and no more: a provider still refusing after the person said
+	// they had signed in is not one to send them back to in a loop.
+	return c.attempt(ctx, method, path, body, out, optionalAuth)
+}
+
+// attempt sends the request once.
+func (c *Client) attempt(ctx context.Context, method, path string, body []byte, out any, optionalAuth bool) error {
 	token, err := c.tokens.Token()
 	if err != nil && !optionalAuth {
 		return err
@@ -286,6 +321,26 @@ func (c *Client) send(ctx context.Context, method, path string, body []byte, out
 	}
 
 	return nil
+}
+
+// SignInURL is where a `sso_required` refusal says to sign in, or "".
+//
+// The control plane ends the message with the address, for a person to
+// read; it is taken from there as it stands.
+func (e *Error) SignInURL() string {
+	if e.Code != CodeSSORequired {
+		return ""
+	}
+
+	words := strings.Fields(e.Message)
+
+	for i := len(words) - 1; i >= 0; i-- {
+		if strings.HasPrefix(words[i], "https://") || strings.HasPrefix(words[i], "http://") {
+			return strings.TrimRight(words[i], ".,;)")
+		}
+	}
+
+	return ""
 }
 
 // decodeError reads the API's error envelope, or falls back to the status.

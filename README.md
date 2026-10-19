@@ -119,6 +119,8 @@ The two are not interchangeable, and the difference is worth knowing:
 
 That third row is the one that bites. Some actions require the person asking to prove who they are *again* when they last signed in more than a few minutes ago: restoring a backup over a protected production environment, adding an SSH key, inviting somebody, changing a member's role, deleting an environment. The API answers `reauthentication_required`, and the CLI re-runs the browser flow and retries once. A bearer token has nothing in it to challenge, so a pipeline cannot satisfy that check. It is not meant to: a gate whose purpose is that somebody is watching should not be passable by something that is not.
 
+A team that requires **single sign-on** asks something else of the same login: that you have signed in at the team's identity provider lately, in a browser. Until you have, its requests answer `sso_required`, and the CLI opens the provider's sign-in for you — only an address on the control plane's own host — waits for Enter, and sends the request once more. One sign-in there covers the browser, the CLI and your SSH key for that team. With no terminal the refusal is printed with the address to open by hand. A personal access token already issued is not asked: CI has no browser.
+
 Deploying, rolling back and redeploying were gated the same way and are not any more. Each of them moves a pointer at code and is the thing you do *during* an incident, so a prompt arrived at the worst possible moment. A restore overwrites the database that is serving customers, which is the act the rule was always for.
 
 ## Not typing what the platform already knows

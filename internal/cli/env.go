@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"strings"
 
 	"github.com/vallic/vallic-cli/internal/api"
 	"github.com/vallic/vallic-cli/internal/auth"
@@ -264,8 +267,64 @@ func (e *Env) Client() (*api.Client, error) {
 
 	e.source = auth.SourceFor(auth.NewClient(cfg.API), creds)
 	e.client = api.New(cfg.API, e.source, e.UserAgent())
+	// A team that signs in through its identity provider: the person is sent
+	// there and the request tried again, rather than refused with an address
+	// to copy into a browser.
+	e.client.SignIn = e.signInAtProvider
 
 	return e.client, nil
+}
+
+// signInAtProvider sends the person to their team's identity provider, and
+// waits for them to come back.
+//
+// The CLI's own sign-in is the person's. A team that requires single sign-on
+// also wants them to have signed in at its provider lately, and that happens
+// in a browser, where the provider's session is; one sign-in there covers
+// this terminal too. The refusal names the address. With a terminal it is
+// opened, and once the person presses Enter the request goes again. Without
+// one — or for an address on any host but the control plane's own, which no
+// refusal of ours names — the refusal is the answer, with the address in it.
+func (e *Env) signInAtProvider(ctx context.Context, refusal *api.Error) error {
+	target := refusal.SignInURL()
+	if target == "" || !e.Interactive() || !e.onControlPlane(target) {
+		return refusal
+	}
+
+	team, _, _ := strings.Cut(refusal.Message, ". ")
+	e.Printer.Warn("%s.", strings.TrimSuffix(team, "."))
+
+	if openBrowser(target) == nil {
+		e.Printer.Say("Opened %s", target)
+	} else {
+		e.Printer.Say("Open %s", target)
+	}
+
+	fmt.Fprint(e.Err, "Press Enter once you have signed in there. ")
+
+	if _, err := bufio.NewReader(e.In).ReadString('\n'); err != nil {
+		return refusal
+	}
+
+	return ctx.Err()
+}
+
+// onControlPlane reports whether an address is on the control plane this
+// CLI talks to: the same scheme and host.
+func (e *Env) onControlPlane(target string) bool {
+	cfg, err := e.Config()
+	if err != nil {
+		return false
+	}
+
+	want, err := url.Parse(cfg.API)
+	if err != nil {
+		return false
+	}
+
+	got, err := url.Parse(target)
+
+	return err == nil && got.Scheme == want.Scheme && strings.EqualFold(got.Host, want.Host)
 }
 
 // PublicClient returns a client for the routes that need no credential.
