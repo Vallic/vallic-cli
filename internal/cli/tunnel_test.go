@@ -26,7 +26,7 @@ func TestTunnelNamesAKnownService(t *testing.T) {
 
 // Every service has a usual port to listen on, so a client's defaults work.
 func TestEveryTunnelServiceHasAPort(t *testing.T) {
-	for _, service := range []string{"db", "mariadb", "postgres", "redis", "valkey", "solr", "meilisearch", "rabbitmq", "memcached", "varnish", "vinyl"} {
+	for _, service := range []string{"db", "mariadb", "postgres", "redis", "valkey", "solr", "meilisearch", "rabbitmq", "memcached", "varnish", "vinyl", "influxdb"} {
 		if tunnelPorts[service] == 0 {
 			t.Errorf("%s has no default port", service)
 		}

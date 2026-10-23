@@ -27,6 +27,7 @@ var tunnelPorts = map[string]int{
 	"rabbitmq":    5672,
 	"vinyl":       6081,
 	"varnish":     6081,
+	"influxdb":    8086,
 }
 
 // tunnelCommand opens a local port onto one of an environment's services.
@@ -48,7 +49,7 @@ connection to the local port runs one SSH session, and the machine relays
 that session to the service you named — of this environment, on its own
 port, and nothing else. Services: db (whichever database the stack runs),
 mariadb, mysql, postgres, redis, valkey, memcached, solr, meilisearch,
-rabbitmq, varnish.
+rabbitmq, varnish, influxdb.
 
 Credentials are the environment's own. For the database:
   vallic ssh <env> -- printenv DB_NAME DB_USER DB_PASSWORD
