@@ -140,6 +140,59 @@ func TestDetectProjectReadsTheFilesInTheCheckout(t *testing.T) {
 			files: map[string]string{"package.json": `{}`, "bun.lock": "{}"},
 			want:  typeNode,
 		},
+		{
+			name:  "an astro site",
+			files: map[string]string{"package.json": `{"scripts":{"build":"astro build"},"dependencies":{"astro":"^5"}}`},
+			want:  typeStatic,
+		},
+		{
+			name:  "a single-page application vite builds",
+			files: map[string]string{"package.json": `{"scripts":{"dev":"vite","build":"vite build"},"dependencies":{"react":"^19"},"devDependencies":{"vite":"^7"}}`},
+			want:  typeStatic,
+		},
+		{
+			// Vite builds its front end; express is what answers.
+			name:  "vite in front of an express server",
+			files: map[string]string{"package.json": `{"scripts":{"build":"vite build"},"dependencies":{"express":"^5"},"devDependencies":{"vite":"^7"}}`},
+			want:  typeNode,
+		},
+		{
+			name:  "an astro site that is a node server",
+			files: map[string]string{"package.json": `{"scripts":{"build":"astro build"},"dependencies":{"astro":"^5","@astrojs/node":"^9"}}`},
+			want:  typeNode,
+		},
+		{
+			name:  "anything with a start script, which is what serves a node application",
+			files: map[string]string{"package.json": `{"scripts":{"build":"vite build","start":"node server.js"},"devDependencies":{"vite":"^7"}}`},
+			want:  typeNode,
+		},
+		{
+			name:  "sveltekit with the static adapter",
+			files: map[string]string{"package.json": `{"scripts":{"build":"vite build"},"devDependencies":{"@sveltejs/kit":"^2","@sveltejs/adapter-static":"^3","vite":"^7"}}`},
+			want:  typeStatic,
+		},
+		{
+			name:  "sveltekit, which is a server without it",
+			files: map[string]string{"package.json": `{"scripts":{"build":"vite build"},"devDependencies":{"@sveltejs/kit":"^2","@sveltejs/adapter-node":"^5","vite":"^7"}}`},
+			want:  typeNode,
+		},
+		{
+			name:  "files committed where nginx serves them",
+			files: map[string]string{"public/index.html": "<h1>hello</h1>"},
+			want:  typeStatic,
+		},
+		{
+			name:  "files committed at the root",
+			files: map[string]string{"index.html": "<h1>hello</h1>", "about.html": "<h1>about</h1>"},
+			want:  typeStatic,
+		},
+		{
+			// Every project may carry an index.html; it decides nothing
+			// where something else here says what runs.
+			name:  "a go service with a page beside it",
+			files: map[string]string{"go.mod": "module example.com/api\n\ngo 1.27\n", "index.html": "<h1>hello</h1>"},
+			want:  typeGo,
+		},
 	}
 
 	for _, c := range cases {
@@ -359,7 +412,7 @@ var manifestKeys = map[string]bool{
 }
 
 func TestStarterUsesOnlyKeysTheControlPlaneUnderstands(t *testing.T) {
-	for _, kind := range []string{typeDrupal, typePHP, typeNode, typeGo, typeRust, typePython, typeDjango, typeRuby} {
+	for _, kind := range []string{typeDrupal, typePHP, typeNode, typeGo, typeRust, typePython, typeDjango, typeRuby, typeStatic} {
 		t.Run(kind, func(t *testing.T) {
 			rendered := renderStarter(starterFor(kind, checkoutWith(t, map[string]string{
 				"composer.json":      `{"require":{"php":"^8.4","drupal/core":"^11"}}`,
@@ -930,5 +983,70 @@ func TestStarterCachesWhatTheBuildInstalls(t *testing.T) {
 				t.Errorf("a cache with no build to keep it for:\n%s", rendered)
 			}
 		})
+	}
+}
+
+// A static site builds in Node's image and is served from public/, with
+// nothing beside it. Its build tool is declared rather than suggested, since
+// the steps cannot run without it and a build tool is taken on at the first
+// build rather than refused. node_modules leaves the release: nothing in it
+// runs, and the release is copied to every machine.
+func TestStaticStarterBuildsInNodeAndServesPublic(t *testing.T) {
+	astro := renderStarter(starterFor(typeStatic, checkoutWith(t, map[string]string{
+		"package.json": `{"engines":{"node":">=22"},"scripts":{"build":"astro build"},"dependencies":{"astro":"^5"}}`,
+	})))
+
+	for _, want := range []string{
+		"type: static\n",
+		"services:\n  - node: '22'\n",
+		"build:\n  steps:\n    - image: node\n      run: npm ci && npm run build && rm -rf public && mv dist public && rm -rf node_modules\n",
+	} {
+		if !strings.Contains(astro, want) {
+			t.Errorf("the file does not say %q:\n%s", want, astro)
+		}
+	}
+
+	for _, unwanted := range []string{"runtime:", "cache:", "start:", "deploy:"} {
+		if strings.Contains(astro, unwanted) {
+			t.Errorf("the file says %q, which a static site has no use for:\n%s", unwanted, astro)
+		}
+	}
+
+	// Gatsby writes public/ itself, so nothing moves.
+	gatsby := renderStarter(starterFor(typeStatic, checkoutWith(t, map[string]string{
+		"package.json": `{"engines":{"node":"22"},"scripts":{"build":"gatsby build"},"dependencies":{"gatsby":"^5"}}`,
+	})))
+	if !strings.Contains(gatsby, "      run: npm ci && npm run build && rm -rf node_modules\n") {
+		t.Errorf("gatsby's build is not left where it writes:\n%s", gatsby)
+	}
+
+	// No version stated: the build tool is left to fill in, and said so.
+	unpinned := starterFor(typeStatic, checkoutWith(t, map[string]string{
+		"package.json": `{"scripts":{"build":"vite build"},"devDependencies":{"vite":"^7"}}`,
+	}))
+	if rendered := renderStarter(unpinned); !strings.Contains(rendered, "# services:\n#   - node: '26'\n") || strings.Contains(rendered, "\nservices:") {
+		t.Errorf("a node version was pinned that nothing here states:\n%s", rendered)
+	}
+	if len(unpinned.Notes) == 0 {
+		t.Error("no note saying the build tool needs its version")
+	}
+
+	// Files and nothing else: no build, nothing beside them.
+	files := starterFor(typeStatic, checkoutWith(t, map[string]string{"public/index.html": "<h1>hello</h1>"}))
+	if rendered := renderStarter(files); strings.Contains(rendered, "build:") || strings.Contains(rendered, "services") {
+		t.Errorf("files committed as they are were given a build or a service:\n%s", rendered)
+	}
+	if len(files.Notes) != 0 {
+		t.Errorf("notes for a site that needs none: %v", files.Notes)
+	}
+
+	// At the root, nginx would serve none of them, and that is said.
+	root := starterFor(typeStatic, checkoutWith(t, map[string]string{"index.html": "<h1>hello</h1>"}))
+	if len(root.Notes) == 0 || !strings.Contains(root.Notes[0], "public/") {
+		t.Errorf("pages at the root were not told nginx serves public/: %v", root.Notes)
+	}
+
+	if err := knownProjectType(typeStatic); err != nil {
+		t.Errorf("--type static is refused: %v", err)
 	}
 }
