@@ -31,6 +31,7 @@ const (
 	typeDjango    = "django"
 	typeRuby      = "ruby"
 	typeRust      = "rust"
+	typeStatic    = "static"
 )
 
 // initCommand writes a starting vallic.yaml.
@@ -55,7 +56,7 @@ func initCommand() *Command {
 	return &Command{
 		Name:    "init",
 		Summary: "write a starting vallic.yaml for this checkout",
-		Usage:   "init [--type drupal|laravel|wordpress|php|nodejs|go|rust|python|django|ruby] [--force]",
+		Usage:   "init [--type drupal|laravel|wordpress|php|nodejs|go|rust|python|django|ruby|static] [--force]",
 		Long: `Writes vallic.yaml in the working directory, and nothing else. It
 needs no credential and reaches nothing, so it works in a checkout of a
 project that does not exist on the platform yet.
@@ -66,8 +67,10 @@ core package or a wp-config.php is WordPress, a composer.json on its own is
 PHP, go.mod is Go, Cargo.toml is Rust, manage.py or a dependency on Django is
 Django, a uv.lock, pyproject.toml or requirements.txt is otherwise Python, a
 Gemfile is Ruby, and package.json is Node — run on Bun where a bun.lock sits
-beside it. The command says which file decided it, and --type overrides the
-answer.
+beside it — unless it builds with Astro, Eleventy, Docusaurus, Gatsby, a
+static SvelteKit or Vite and starts no server, which is a static site, as is
+an index.html with nothing beside it that runs. The command says which file
+decided it, and --type overrides the answer.
 
 The kind is worth getting right rather than settling for the generic one: it
 decides the cron command the platform runs, which directories survive a
@@ -195,6 +198,16 @@ type starter struct {
 	// server.
 	Start string
 
+	// BuildImage is the image every build step runs in, where it is not the
+	// application's own: a static site's application is nginx, which has no
+	// npm, so its steps name Node's.
+	BuildImage string
+
+	// Tools are build tools the steps run in, written as services rather
+	// than suggested: the build cannot run without them, and a build tool is
+	// taken on at the first build rather than refused, as a database is.
+	Tools []string
+
 	// Services are suggestions, written commented out. See initCommand.
 	Services []string
 
@@ -265,7 +278,14 @@ func detectProject(dir string) (kind, because string, err error) {
 		return typeRuby, because, nil
 	}
 
-	if _, readErr := os.Stat(filepath.Join(dir, "package.json")); readErr == nil {
+	if raw, readErr := os.ReadFile(filepath.Join(dir, "package.json")); readErr == nil {
+		// Files a generator writes, which nginx serves with nothing running
+		// behind them. Before Bun's lockfile, which says how the build
+		// installs and not that anything is served.
+		if generator, _ := staticGenerator(raw); generator != "" {
+			return typeStatic, "package.json, which builds with " + generator + " and starts no server", nil
+		}
+
 		// Still Node: Bun is a runtime of the nodejs type, chosen under
 		// `runtime` and not by the type. Named, because it changes every
 		// step the file writes.
@@ -276,11 +296,19 @@ func detectProject(dir string) (kind, because string, err error) {
 		return typeNode, "package.json", nil
 	}
 
+	// Files committed as they are, with nothing here that builds or runs
+	// them. Last, because every project above may carry an index.html.
+	for _, page := range []string{"public/index.html", "index.html"} {
+		if _, readErr := os.Stat(filepath.Join(dir, filepath.FromSlash(page))); readErr == nil {
+			return typeStatic, page + ", with nothing here that runs", nil
+		}
+	}
+
 	// A usage error rather than a failure: the fix is an argument, and the
 	// help printed with it lists the kinds that work.
 	return "", "", Usagef(nil,
-		"nothing here says what this project is: no composer.json, wp-config.php, go.mod, Cargo.toml, pyproject.toml, requirements.txt, Gemfile or package.json\n"+
-			"  name it: vallic init --type drupal|laravel|wordpress|php|nodejs|go|rust|python|django|ruby",
+		"nothing here says what this project is: no composer.json, wp-config.php, go.mod, Cargo.toml, pyproject.toml, requirements.txt, Gemfile, package.json or index.html\n"+
+			"  name it: vallic init --type drupal|laravel|wordpress|php|nodejs|go|rust|python|django|ruby|static",
 	)
 }
 
@@ -355,11 +383,11 @@ func detectPython(dir string) (kind, because string) {
 // knownProjectType refuses a --type this writes no file for.
 func knownProjectType(kind string) error {
 	switch kind {
-	case typeDrupal, typeLaravel, typeWordPress, typePHP, typeNode, typeGo, typeRust, typePython, typeDjango, typeRuby:
+	case typeDrupal, typeLaravel, typeWordPress, typePHP, typeNode, typeGo, typeRust, typePython, typeDjango, typeRuby, typeStatic:
 		return nil
 	}
 
-	return Usagef(nil, "--type takes drupal, laravel, wordpress, php, nodejs, go, rust, python, django or ruby, not %q", kind)
+	return Usagef(nil, "--type takes drupal, laravel, wordpress, php, nodejs, go, rust, python, django, ruby or static, not %q", kind)
 }
 
 // starterFor builds the starting file for one kind of project.
@@ -375,6 +403,8 @@ func starterFor(kind, dir string) *starter {
 		return pythonStarter(kind, dir)
 	case typeRuby:
 		return rubyStarter(dir)
+	case typeStatic:
+		return staticStarter(dir)
 	default:
 		return phpStarter(kind, dir)
 	}
@@ -568,6 +598,140 @@ func packageManagerVersion(raw []byte, tool string) string {
 	version, _, _ = strings.Cut(version, "+")
 
 	return version
+}
+
+// staticStarter is a static site: the files a build writes, which nginx
+// serves from public/ with nothing running behind them.
+//
+// No `runtime:` line. Its key is the server's, `nginx:`, and a checkout
+// never says which nginx it was written for, so the platform's default
+// serves it.
+func staticStarter(dir string) *starter {
+	manifest := &starter{
+		Type:       typeStatic,
+		VersionKey: "nginx",
+	}
+
+	raw, readErr := os.ReadFile(filepath.Join(dir, "package.json"))
+	if readErr != nil {
+		// Files committed as they are, and nothing to build. nginx serves
+		// public/ and nothing else in the release, so a site whose pages sit
+		// at the root answers every path with a 404 until they move.
+		if _, err := os.Stat(filepath.Join(dir, "public", "index.html")); err != nil {
+			manifest.Notes = append(manifest.Notes,
+				"nginx serves public/ and nothing else, so move the site's files into it")
+		}
+
+		return manifest
+	}
+
+	// In Node's image, which the steps name: the application's own is
+	// nginx's, with no npm in it.
+	manifest.BuildImage = "node"
+
+	// The major alone, as for Node. A build tool needs a version under
+	// services, and with none stated the line is left for somebody to fill
+	// in rather than pinned to whatever was current when this was built.
+	if node := firstVersion(packageEngine(raw, "node"), 1); node != "" {
+		manifest.Tools = []string{"node: '" + node + "'"}
+	} else {
+		manifest.Services = []string{"node: '26'"}
+		manifest.Notes = append(manifest.Notes,
+			"package.json states no node version, and the build runs in Node: uncomment it under services with the one you build with")
+	}
+
+	step := "npm ci"
+
+	switch _, output := staticGenerator(raw); {
+	case !hasScript(raw, "build"):
+		manifest.Notes = append(manifest.Notes,
+			"package.json has no build script, so nothing writes the site: add one, or commit its files in public/")
+	case output == "":
+		step += " && npm run build"
+		manifest.Notes = append(manifest.Notes,
+			"nginx serves public/: if the build writes the site anywhere else, end the step by moving it there")
+	case output == "public":
+		// Gatsby's, which is where nginx serves it from already.
+		step += " && npm run build"
+	default:
+		// Into public/, where nginx serves it from. The generator reads its
+		// own public/ as input and has copied it into what it wrote.
+		step += " && npm run build && rm -rf public && mv " + output + " public"
+	}
+
+	// Nothing in a static site's release runs node_modules, and the release
+	// is copied to every machine. npm's downloads are kept between builds by
+	// the platform, so there is nothing to cache either.
+	manifest.Build = []string{step + " && rm -rf node_modules"}
+
+	return manifest
+}
+
+// staticGenerators are the packages that build a static site by default,
+// with the directory each writes it to, most specific first: SvelteKit
+// depends on Vite, and is static only with this adapter.
+var staticGenerators = []struct{ pkg, output string }{
+	{"astro", "dist"},
+	{"@11ty/eleventy", "_site"},
+	{"@docusaurus/core", "build"},
+	{"gatsby", "public"},
+	{"@sveltejs/adapter-static", "build"},
+	{"vite", "dist"},
+}
+
+// staticServers are packages that make a project a server even where it
+// builds with one of the generators above: Astro with its Node adapter,
+// SvelteKit without the static one, and the frameworks and servers that
+// answer requests themselves.
+var staticServers = []string{
+	"@astrojs/node", "@sveltejs/kit", "next", "nuxt", "@remix-run/node",
+	"@react-router/node", "express", "fastify", "koa", "hono",
+}
+
+// staticGenerator names the generator a package.json builds a static site
+// with, and where it writes it, or nothing where it does not.
+//
+// Nothing for one with a start script, which is what serves a Node
+// application, or one depending on a server: Vite builds the front end of
+// plenty of applications that are their own server.
+func staticGenerator(raw []byte) (generator, output string) {
+	if hasScript(raw, "start") {
+		return "", ""
+	}
+
+	adapter := packageDepends(raw, "@sveltejs/adapter-static")
+
+	for _, server := range staticServers {
+		if packageDepends(raw, server) && !(server == "@sveltejs/kit" && adapter) {
+			return "", ""
+		}
+	}
+
+	for _, known := range staticGenerators {
+		if packageDepends(raw, known.pkg) {
+			return known.pkg, known.output
+		}
+	}
+
+	return "", ""
+}
+
+// packageDepends reports whether a package.json depends on a package, for
+// the build or at runtime.
+func packageDepends(raw []byte, name string) bool {
+	var file struct {
+		Dependencies    map[string]string `json:"dependencies"`
+		DevDependencies map[string]string `json:"devDependencies"`
+	}
+
+	if err := json.Unmarshal(raw, &file); err != nil {
+		return false
+	}
+
+	_, runtime := file.Dependencies[name]
+	_, build := file.DevDependencies[name]
+
+	return runtime || build
 }
 
 // goStarter is a compiled Go binary, which serves its own HTTP too.
@@ -1204,7 +1368,35 @@ func renderStarter(s *starter) string {
 		fmt.Fprintf(&b, "\nruntime:\n  %s: '%s'\n", s.VersionKey, s.Version)
 	}
 
-	b.WriteString(`
+	switch {
+	case len(s.Tools) > 0:
+		b.WriteString(`
+# What the build runs in. Nothing runs beside a static site, so the only
+# service is the build tool its steps name, at the version they were written
+# against.
+services:
+`)
+
+		for _, tool := range s.Tools {
+			fmt.Fprintf(&b, "  - %s\n", tool)
+		}
+	case s.Type == typeStatic && len(s.Services) > 0:
+		b.WriteString(`
+# What the build runs in. Nothing runs beside a static site, so the only
+# service is the build tool its steps name, and nothing here says which
+# version of it: uncomment it with the one you build with.
+#
+# services:
+`)
+
+		for _, service := range s.Services {
+			fmt.Fprintf(&b, "#   - %s\n", service)
+		}
+	case s.Type == typeStatic:
+		// Files and nothing else: nothing to run beside them, and nothing
+		// to build them in.
+	default:
+		b.WriteString(`
 # What this application needs beside it, with the version the code was written
 # against. Nothing is declared here because a checkout does not say, and naming
 # a database an environment does not run refuses the deploy rather than warning
@@ -1214,14 +1406,22 @@ func renderStarter(s *starter) string {
 # services:
 `)
 
-	for _, service := range s.Services {
-		fmt.Fprintf(&b, "#   - %s\n", service)
+		for _, service := range s.Services {
+			fmt.Fprintf(&b, "#   - %s\n", service)
+		}
 	}
 
 	if len(s.Build) > 0 {
 		b.WriteString("\nbuild:\n  steps:\n")
 
 		for _, step := range s.Build {
+			// In another image than the application's: a mapping, which is
+			// the shape that can say which.
+			if s.BuildImage != "" {
+				fmt.Fprintf(&b, "    - image: %s\n      run: %s\n", s.BuildImage, step)
+				continue
+			}
+
 			fmt.Fprintf(&b, "    - %s\n", step)
 		}
 
