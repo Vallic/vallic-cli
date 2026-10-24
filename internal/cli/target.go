@@ -37,9 +37,9 @@ func (t *Target) Named() string {
 //
 // The precedence is settled here, once, for both nouns: a flag beats the
 // environment variable, and both beat the checkout. The project `vallic
-// link` recorded comes after the checkout, not before it — it is one answer
-// for every directory on the machine, and a checkout that names its own
-// project is the better one. See internal/resolve for the rules below that.
+// link` recorded answers only where there is no git remote — it is one
+// answer for every directory on the machine, and a checkout answers for
+// itself or not at all. See internal/resolve for the rules below that.
 func (e *Env) Resolver(client resolve.Client) (*resolve.Resolver, error) {
 	cfg, err := e.Config()
 	if err != nil {

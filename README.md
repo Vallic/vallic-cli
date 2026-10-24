@@ -237,7 +237,7 @@ when it is left off.
 | `cdn show\|clear` · `metrics` | What the CDN caches, and emptying it; CPU, memory and disk over a window |
 | `validate [--local]` | Checking `vallic.yaml` before you commit it |
 | `init` | Writes a starting `vallic.yaml` from what the checkout looks like: Drupal, Laravel, WordPress, PHP, Node.js (or Bun), Go, Rust, Python, Django, Ruby and Rails |
-| `link` | Records which project this checkout is, when the git remote cannot say |
+| `link` | Records a project for directories with no git remote; a checkout whose remote names no project is refused |
 
 Upsun's and Platform.sh's spelling works too: `vallic db:dump`, `vallic environment:list` and `vallic user:add` are `db dump`, `env list` and `team invite`.
 

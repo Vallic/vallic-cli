@@ -230,9 +230,8 @@ func TestACheckoutBeatsTheRecordedProject(t *testing.T) {
 	}
 }
 
-// The linked project answers where the checkout cannot: no git, or a remote
-// naming no project this credential can see.
-func TestTheRecordedProjectAnswersWhereTheCheckoutCannot(t *testing.T) {
+// The linked project answers where there is no git remote to say.
+func TestTheRecordedProjectAnswersWhereThereIsNoRemote(t *testing.T) {
 	client := &fakeClient{
 		projects: []api.Project{
 			{ID: 1, MachineName: "blog", Repository: repo("acme/blog")},
@@ -240,17 +239,69 @@ func TestTheRecordedProjectAnswersWhereTheCheckoutCannot(t *testing.T) {
 		},
 	}
 
-	for name, dir := range map[string]string{
-		"no git":          t.TempDir(),
-		"a fork's remote": checkout(t, "git@github.com:someone/shop-fork.git"),
+	got, err := (&Resolver{Client: client, Dir: t.TempDir(), ProjectRecorded: "blog"}).Project(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MachineName != "blog" {
+		t.Errorf("resolved %s, want the linked blog", got.MachineName)
+	}
+}
+
+// A checkout whose remote names no project is refused, whatever is linked
+// and however few projects there are.
+//
+// Both are answers for some other directory. Taking the link here sent a
+// database dump, run in a checkout whose remote still had its repository's
+// old name, to another project's production.
+func TestAnUnmatchedRemoteIsRefused(t *testing.T) {
+	for name, tc := range map[string]struct {
+		projects []api.Project
+		recorded string
+	}{
+		"with a project linked": {
+			projects: []api.Project{
+				{ID: 1, MachineName: "blog", Repository: repo("acme/blog")},
+				{ID: 2, MachineName: "webshop", Repository: repo("acme/shop")},
+			},
+			recorded: "blog",
+		},
+		"with only one project": {
+			projects: []api.Project{{ID: 1, MachineName: "blog", Repository: repo("acme/blog")}},
+		},
 	} {
-		got, err := (&Resolver{Client: client, Dir: dir, ProjectRecorded: "blog"}).Project(context.Background())
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		if got.MachineName != "blog" {
-			t.Errorf("%s: resolved %s, want the linked blog", name, got.MachineName)
-		}
+		t.Run(name, func(t *testing.T) {
+			r := &Resolver{
+				Client:          &fakeClient{projects: tc.projects},
+				Dir:             checkout(t, "git@github.com:acme/old-name.git"),
+				ProjectRecorded: tc.recorded,
+			}
+
+			got, err := r.Project(context.Background())
+
+			var ambiguous *Ambiguous
+			if !errors.As(err, &ambiguous) {
+				t.Fatalf("resolved %v, err %v; want an *Ambiguous", got, err)
+			}
+
+			if ambiguous.Remote != "acme/old-name" {
+				t.Errorf("Remote = %q, want acme/old-name", ambiguous.Remote)
+			}
+
+			msg := err.Error()
+			if !strings.Contains(msg, "acme/old-name") {
+				t.Errorf("the error does not name the remote:\n%s", msg)
+			}
+			if !strings.Contains(msg, "git remote set-url") {
+				t.Errorf("the error does not say how to fix the remote:\n%s", msg)
+			}
+
+			// The link cannot answer in a checkout, so offering it would send
+			// somebody to a command that changes nothing here.
+			if strings.Contains(msg, "vallic link") {
+				t.Errorf("the error offers vallic link, which does not answer in a checkout:\n%s", msg)
+			}
+		})
 	}
 }
 

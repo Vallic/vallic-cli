@@ -28,8 +28,8 @@ vallic ssh-key add
 vallic ssh-key add ~/.ssh/vallic.pub --label work-laptop
 vallic ssh-key list
 
-# Record a project for directories that are not a clone of its repository.
-# One for the whole machine: a clone's own remote still answers first.
+# Record a project for directories with no git remote. One for the whole
+# machine, so a checkout never uses it: its remote answers, or it is refused.
 vallic link acme-site
 
 # What this checkout points at: project, environment, branch, last deploy
