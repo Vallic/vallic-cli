@@ -53,6 +53,11 @@ type Ambiguous struct {
 
 	// Because is why the CLI could not decide, in a clause.
 	Because string
+
+	// Remote is the checkout's repository, as `owner/name`, when it names one
+	// no project builds from. `vallic link` cannot answer in a checkout, so
+	// it is not offered there; the remote is what needs fixing.
+	Remote string
 }
 
 func (e *Ambiguous) Error() string {
@@ -79,9 +84,13 @@ func (e *Ambiguous) Error() string {
 
 	// Only for a project, because `link` records only a project. Offering it
 	// for an environment would point somebody at a command that cannot fix
-	// what they just hit.
-	if e.What == "project" {
-		fmt.Fprint(&b, "\n  or record it for this checkout: vallic link <name>")
+	// what they just hit — and the same goes for a checkout with a remote,
+	// where the link never answers.
+	switch {
+	case e.Remote != "":
+		fmt.Fprint(&b, "\n  or, if the repository was renamed or moved: git remote set-url origin <its url>")
+	case e.What == "project":
+		fmt.Fprint(&b, "\n  or record it for this directory: vallic link <name>")
 	}
 
 	return b.String()
@@ -127,9 +136,10 @@ type Resolver struct {
 
 	// ProjectRecorded is what `vallic link` wrote in the configuration. It
 	// answers for every directory on the machine, so it is asked only where
-	// the checkout cannot answer: read before the git remote, a project
+	// there is no git remote at all: read before the git remote, a project
 	// linked for one checkout sent `vallic drush` and `vallic deploy` run in
-	// another to the first one's production.
+	// another to the first one's production, and read for a remote that
+	// matched nothing, it did the same to a checkout of a renamed repository.
 	ProjectRecorded string
 }
 
@@ -153,10 +163,26 @@ func (r *Resolver) Project(ctx context.Context) (*api.Project, error) {
 		if match := projectByRepository(projects, remote); match != nil {
 			return match, nil
 		}
+
+		// A checkout that names a repository no project builds from is not
+		// answered by anything below. What was linked and "the only project"
+		// are both answers for some other directory: taken here, a dump run
+		// in one project's checkout, whose remote still had the repository's
+		// old name, came back with another project's production database.
+		name := normaliseRemote(remote)
+		if name == "" {
+			name = remote
+		}
+
+		return nil, &Ambiguous{
+			What:       "project",
+			Candidates: projectNames(projects),
+			Because:    fmt.Sprintf("this checkout's remote is %s, and no project you can see builds from it", name),
+			Remote:     name,
+		}
 	}
 
-	// What was linked, for a checkout whose remote names no project here: a
-	// fork, a mirror, a directory with no git at all.
+	// What was linked, for a directory with no git remote to say.
 	if r.ProjectRecorded != "" {
 		return matchProject(projects, r.ProjectRecorded)
 	}

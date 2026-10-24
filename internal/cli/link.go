@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -12,40 +13,41 @@ import (
 	"github.com/vallic/vallic-cli/internal/resolve"
 )
 
-// linkCommand records which project a checkout is.
+// linkCommand records which project a directory with no git remote is.
 //
-// For the one case internal/resolve cannot answer on its own: a checkout
-// whose remote matches no project this credential can see, where the
-// resolution stops and lists the candidates rather than picking one. A fork,
-// a mirror, a repository added under a different host, or no git at all.
+// For the one case internal/resolve cannot answer on its own: a directory
+// that is not a checkout, or a checkout with no origin, where there is
+// nothing to match a project against.
 //
-// What it records is not a property of the checkout, and that is the whole
+// What it records is not a property of the directory, and that is the whole
 // caveat. It goes in the configuration this machine shares between every
-// directory, so the resolver reads it only *after* the git remote: a
-// checkout that names its own project goes on resolving to it. Read first,
-// a project linked once answered for every checkout on the machine, and a
-// command run in one project's checkout acted on another project.
+// directory, so the resolver never reads it where there is a git remote. Read
+// before the remote, a project linked once answered for every checkout on the
+// machine; read after a remote that matched nothing, it still answered for a
+// checkout of a renamed repository. Both times a command run in one project's
+// checkout acted on another project.
 func linkCommand() *Command {
 	var forget bool
 
 	return &Command{
 		Name:    "link",
-		Summary: "record which project this checkout is",
+		Summary: "record which project a directory with no git remote is",
 		Usage:   "link [<project>] [--clear]",
 		Long: `Most checkouts need this and never run it. A project carries its
 repository's full name, so the git remote is matched against it and the
 project is worked out with nothing recorded anywhere.
 
-This is for the checkouts where that fails, which is what "cannot tell which
-project you mean" is saying: a fork, a mirror, a repository the project was
-added under another name, or a directory that is not a checkout at all.
+This is for the directories where there is no remote to match: one that is
+not a checkout at all, or a checkout with no origin.
+
+A checkout whose remote names no project is refused rather than answered from
+here: what is recorded is one project for the whole machine, and the checkout
+is most likely another one's. Update the remote if the repository was renamed
+or moved, or name the project with --project or VALLIC_PROJECT for a fork or
+a mirror.
 
 With no argument it says what is recorded now, or what commands resolve to
-here without it.
-
-What it records is machine-wide, not per checkout, so it answers only where
-a checkout cannot: a checkout whose git remote names a project you can see
-goes on resolving to that project. --clear forgets it.
+here without it. --clear forgets it.
 
 It records no environment, and that is deliberate. The environment comes from
 the branch, which changes while you work. An environment recorded once would
@@ -107,10 +109,10 @@ VALLIC_ENVIRONMENT.`,
 				return env.Printer.Value(map[string]any{"project": chosen})
 			}
 
-			env.Printer.Good("Commands act on %s where a checkout cannot say.", chosen.MachineName)
+			env.Printer.Good("Commands act on %s where there is no git remote to say.", chosen.MachineName)
 
 			if dir, dirErr := config.Dir(); dirErr == nil {
-				env.Printer.Say("  recorded in %s, for the checkouts on this machine that cannot say", dir)
+				env.Printer.Say("  recorded in %s, for the directories on this machine with no git remote", dir)
 			}
 
 			warnOverridden(ctx, env, projects, chosen)
@@ -128,7 +130,7 @@ VALLIC_ENVIRONMENT.`,
 // for a `$(…)` to capture, and which of the two it is goes to stderr.
 func reportLink(ctx context.Context, env *Env, cfg *config.Config, projects []api.Project) error {
 	recorded := cfg.Project
-	inferred := inferProject(ctx, projects)
+	inferred, refused := inferProject(ctx, projects)
 
 	if env.Printer.Structured() {
 		name := ""
@@ -157,10 +159,17 @@ func reportLink(ctx context.Context, env *Env, cfg *config.Config, projects []ap
 		env.Printer.Say("  worked out from this checkout")
 
 		if recorded != "" && recorded != inferred.MachineName {
-			env.Printer.Say("  %s is recorded too, and answers only where a checkout cannot say", recorded)
+			env.Printer.Say("  %s is recorded too, and answers only where there is no git remote", recorded)
 		}
 
 		return nil
+	}
+
+	// A checkout whose remote names no project. Commands run here are refused
+	// and what is recorded does not answer, so printing it would be the wrong
+	// answer to "which project am I on".
+	if refused != nil {
+		return refused
 	}
 
 	if recorded == "" {
@@ -181,7 +190,7 @@ func reportLink(ctx context.Context, env *Env, cfg *config.Config, projects []ap
 	env.Printer.Line("%s", recorded)
 
 	if dir, err := config.Dir(); err == nil {
-		env.Printer.Say("  recorded in %s, for the checkouts on this machine that cannot say", dir)
+		env.Printer.Say("  recorded in %s, for the directories on this machine with no git remote", dir)
 	}
 
 	return nil
@@ -216,7 +225,7 @@ func clearLink(env *Env, cfg *config.Config) error {
 		// command reads the same variable again.
 		env.Printer.Good("The configuration file records no project now.")
 	default:
-		env.Printer.Good("Forgot %s. A checkout that cannot say which project it is will be asked.", was)
+		env.Printer.Good("Forgot %s. A directory with no git remote will be asked which project it is.", was)
 	}
 
 	if fromEnv != "" {
@@ -237,10 +246,15 @@ func warnOverridden(ctx context.Context, env *Env, projects []api.Project, chose
 		env.Printer.Warn("VALLIC_PROJECT is set to %s, every command reads it first, and it has not changed", fromEnv)
 	}
 
-	inferred := inferProject(ctx, projects)
+	inferred, refused := inferProject(ctx, projects)
 
 	if inferred != nil && inferred.ID != chosen.ID {
-		env.Printer.Warn("this checkout goes on resolving to %s, which its git remote names; the link answers only where a checkout cannot say", inferred.MachineName)
+		env.Printer.Warn("this checkout goes on resolving to %s, which its git remote names; the link answers only where there is no git remote", inferred.MachineName)
+	}
+
+	var ambiguous *resolve.Ambiguous
+	if errors.As(refused, &ambiguous) {
+		env.Printer.Warn("this checkout's remote is %s, which no project builds from, so the link does not answer here; update the remote, or name the project with --project or VALLIC_PROJECT", ambiguous.Remote)
 	}
 }
 
@@ -251,20 +265,28 @@ func warnOverridden(ctx context.Context, env *Env, projects []api.Project, chose
 // command's whole job, and a hint would answer with what was recorded a
 // moment ago.
 //
-// A failure is not one: it means the checkout cannot say, which is the state
-// this command is for.
-func inferProject(ctx context.Context, projects []api.Project) *api.Project {
+// A failure is mostly not one: it means there is no remote to say, which is
+// the state this command is for. The exception comes back as the error: a
+// checkout whose remote names no project, which commands refuse and which
+// nothing recorded answers for.
+func inferProject(ctx context.Context, projects []api.Project) (*api.Project, error) {
 	dir, err := os.Getwd()
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 
 	project, err := (&resolve.Resolver{Client: known(projects), Dir: dir}).Project(ctx)
-	if err != nil {
-		return nil
+
+	var ambiguous *resolve.Ambiguous
+	if errors.As(err, &ambiguous) && ambiguous.Remote != "" {
+		return nil, err
 	}
 
-	return project
+	if err != nil {
+		return nil, nil
+	}
+
+	return project, nil
 }
 
 // known answers a resolver out of the list this command already read, so
