@@ -230,7 +230,7 @@ when it is left off.
 | `ssh` · `sql` · `db dump\|export\|import\|size` · `mount` | Getting inside. `db dump` writes a file named for the project and environment, all of it or `--table`s; `db size` shows the largest tables; `sql -- <query>` runs one query |
 | `drush` | `drush` in the container, over the same forced command `ssh --` uses |
 | `var list\|get\|set\|delete\|import\|apply` | Variables, at either scope; `import` adds a `.env`, `apply` restarts the site with them now |
-| `domain list\|add\|verify\|delete` | Hostnames, and the DNS each one needs |
+| `domain list\|add\|verify\|primary\|canonical\|delete` | Hostnames, the DNS each one needs, and which one the site redirects to |
 | `service list` | The stack, and the versions that go in `vallic.yaml` |
 | `backup list\|create\|download\|restore` | Copies, and putting one back |
 | `env create` · `env source` · `env maintenance` · `env delete` | Raising, repointing, taking offline and removing an environment |

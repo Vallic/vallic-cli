@@ -26,6 +26,8 @@ actually being routed.`,
 			domainListCommand(),
 			domainAddCommand(),
 			domainVerifyCommand(),
+			domainPrimaryCommand(),
+			domainCanonicalCommand(),
 			domainDeleteCommand(),
 		},
 	}
@@ -62,7 +64,7 @@ records the platform is looking for when it does not find them.`,
 			}
 
 			table := output.Table{
-				Columns: []string{"hostname", "kind", "state", "canonical", "tls"},
+				Columns: []string{"hostname", "kind", "state", "primary", "canonical", "tls"},
 				Empty:   "No hostnames, which should not be possible.",
 			}
 
@@ -74,6 +76,7 @@ records the platform is looking for when it does not find them.`,
 					domain.Kind,
 					domainState(domain),
 					yesNo(domain.IsPrimary),
+					yesNo(domain.IsCanonical),
 					domain.TLSMode,
 				})
 			}
@@ -226,6 +229,88 @@ pass picks up a record that lands later anyway.`,
 			return reportVerification(env, result)
 		},
 	}
+}
+
+func domainPrimaryCommand() *Command {
+	return &Command{
+		Name:    "primary",
+		Summary: "make a hostname the site's address",
+		Usage:   "domain primary <hostname> [<env>]",
+		Long: `Makes it the address the site is: its base URL, and the one the
+platform hostname redirects to, path and all. Your other hostnames go on
+serving the site as they are; ` + "`domain canonical`" + ` redirects them too.
+
+On a hostname that is canonical it stops the other hostnames redirecting, and
+it stays primary.
+
+Making the platform hostname primary again is how redirects are turned off:
+nothing redirects then.
+
+Only a verified hostname can be primary.`,
+		Run: func(ctx context.Context, env *Env, args []string) error {
+			return promoteDomain(ctx, env, args, false)
+		},
+	}
+}
+
+func domainCanonicalCommand() *Command {
+	return &Command{
+		Name:    "canonical",
+		Summary: "make a hostname primary, and redirect every other one to it",
+		Usage:   "domain canonical <hostname> [<env>]",
+		Long: `Makes it primary, and redirects every other hostname of the
+environment to it, path and all — the platform hostname and your other
+domains alike. ` + "`domain primary`" + ` on the same hostname undoes the redirects and
+keeps it primary.
+
+Only one of your own verified hostnames can be canonical. The platform
+hostname cannot, because your own domains would redirect to it.`,
+		Run: func(ctx context.Context, env *Env, args []string) error {
+			return promoteDomain(ctx, env, args, true)
+		},
+	}
+}
+
+// promoteDomain is domain primary and domain canonical: the same request,
+// with or without the other hostnames redirecting.
+func promoteDomain(ctx context.Context, env *Env, args []string, canonical bool) error {
+	if len(args) == 0 {
+		return Usagef(nil, "name a hostname")
+	}
+
+	hostname := args[0]
+
+	target, err := env.ResolveEnvironment(ctx, firstOf(args[1:]))
+	if err != nil {
+		return err
+	}
+
+	client, err := env.Client()
+	if err != nil {
+		return err
+	}
+
+	domain, err := findDomain(ctx, client, target.Environment.ID, hostname)
+	if err != nil {
+		return err
+	}
+
+	updated, err := client.PromoteDomain(ctx, domain.ID, canonical)
+	if err != nil {
+		if api.Code(err) == "not_verified" {
+			return fmt.Errorf("%w\n  vallic domain verify %s", err, domain.Hostname)
+		}
+
+		return err
+	}
+
+	if env.Printer.Structured() {
+		return env.Printer.Value(updated)
+	}
+
+	env.Printer.Good("%s", updated.Message)
+
+	return nil
 }
 
 func domainDeleteCommand() *Command {

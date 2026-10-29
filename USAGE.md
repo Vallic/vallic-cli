@@ -300,6 +300,11 @@ vallic domain add shop.example.com production
 vallic domain verify shop.example.com production
 vallic domain list production
 
+# The site's address: the platform hostname redirects to it, other domains
+# still serve. Canonical redirects every other hostname to it too
+vallic domain primary shop.example.com production
+vallic domain canonical shop.example.com production
+
 # Give one up
 vallic domain delete old.example.com production
 ```
