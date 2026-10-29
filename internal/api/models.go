@@ -692,8 +692,12 @@ type Domain struct {
 	// environment and cannot be removed on its own.
 	Kind string `json:"kind"`
 
-	IsPrimary bool `json:"is_primary"`
-	IsApex    bool `json:"is_apex"`
+	// IsPrimary is the site's address, which the platform hostname redirects
+	// to; IsCanonical, only ever on a primary custom domain, redirects every
+	// other hostname to it as well.
+	IsPrimary   bool `json:"is_primary"`
+	IsCanonical bool `json:"is_canonical"`
+	IsApex      bool `json:"is_apex"`
 
 	// VerificationState is three values, not two: "unverified" means never
 	// checked, "failed" means checked and the record was wrong. A client with
@@ -761,6 +765,13 @@ type VerificationResult struct {
 	// are the new ones. The TXT record disappears from the instructions once
 	// the hostname is verified.
 	Domain Domain `json:"domain"`
+}
+
+// DomainUpdated is a domain after a change, and what the change did, in
+// English, for printing.
+type DomainUpdated struct {
+	Domain  Domain `json:"domain"`
+	Message string `json:"message"`
 }
 
 // DomainRemoved is what a delete removed.

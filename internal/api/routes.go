@@ -463,6 +463,33 @@ func (c *Client) VerifyDomain(ctx context.Context, domainID int) (*VerificationR
 	return &out, nil
 }
 
+// PromoteDomain makes a hostname the environment's primary address, and says
+// whether every other hostname redirects to it.
+//
+// Canonical false is sent as well as primary true, rather than primary alone,
+// so the one request means "primary and nothing more" whatever the hostname
+// was: a canonical one stays primary and stops redirecting the others, which
+// primary alone would leave as it is.
+func (c *Client) PromoteDomain(ctx context.Context, domainID int, canonical bool) (*DomainUpdated, error) {
+	patch := map[string]any{"canonical": canonical}
+	if !canonical {
+		patch["primary"] = true
+	}
+
+	body, err := json.Marshal(patch)
+	if err != nil {
+		return nil, err
+	}
+
+	var out DomainUpdated
+
+	if err := c.do(ctx, http.MethodPatch, fmt.Sprintf("/domains/%d", domainID), body, &out); err != nil {
+		return nil, err
+	}
+
+	return &out, nil
+}
+
 // DeleteDomain removes a hostname.
 func (c *Client) DeleteDomain(ctx context.Context, domainID int) (*DomainRemoved, error) {
 	var out DomainRemoved
