@@ -245,6 +245,26 @@ func (t *Target) Run(command_ []string, tty bool) *exec.Cmd {
 	return command("ssh", args...)
 }
 
+// RunLine is one command line, inside the container, as it was typed.
+//
+// Not quoted: a line is already what the shell on the far side should parse,
+// pipes, semicolons and quotes of its own included, the way `ssh host 'a; b'`
+// hands its one argument on. Quoted as a word, it reached `sh -c` as the name
+// of a program with spaces in it, and every such line answered "not found".
+func (t *Target) RunLine(line string, tty bool) *exec.Cmd {
+	args := t.options()
+
+	if tty {
+		args = append(args, "-t")
+	} else {
+		args = append(args, "-T")
+	}
+
+	args = append(args, t.Destination(), t.named(line))
+
+	return command("ssh", args...)
+}
+
 // Verb runs one of the forced command's verbs.
 //
 // A verb is a word — `db-export`, `db-import`, `files-path` — that the agent

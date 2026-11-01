@@ -78,7 +78,12 @@ Nothing runs on the host. The account on the far side has a forced command
 that hands what you asked for to a shell inside the container, and sshd
 refuses every kind of forwarding.
 
-With -- it runs one command instead of opening a shell.
+With -- it runs one command instead of opening a shell. Several words are
+passed on each as one word; a single quoted argument is a command line, for
+the shell inside the container to parse, pipes and semicolons included:
+
+    vallic ssh production -- drush sql:query "SELECT 1"
+    vallic ssh production -- 'curl -s localhost | head -5; ls current'
 
 An environment on several machines is reached through its front, which carries
 the connection on to the machine: --machine names one (` + "`vallic env info`" + ` lists
@@ -111,9 +116,17 @@ there is one — by its full name or the short one:
 		}
 
 		var process *exec.Cmd
-		if len(remote) > 0 {
+		switch {
+		case len(remote) == 1:
+			// One argument is a command line, quoted locally to keep it
+			// whole: `-- 'curl -s localhost | head'`. Passed on as it is,
+			// for the shell inside the container to parse, as ssh does.
+			process = target.RunLine(remote[0], false)
+		case len(remote) > 1:
+			// Several are words, each kept whole on the far side:
+			// `-- drush sql:query "SELECT 1"`.
 			process = target.Run(remote, false)
-		} else {
+		default:
 			process = target.Shell()
 		}
 

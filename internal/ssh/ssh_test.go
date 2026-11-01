@@ -74,6 +74,37 @@ func TestRunPassesOneQuotedString(t *testing.T) {
 	}
 }
 
+// A command line typed as one argument reaches the container's shell as it
+// was typed. Quoted as one word, `-- 'curl -s localhost; ps'` asked sh for a
+// program called that whole line and answered "not found".
+func TestRunLinePassesTheLineAsTyped(t *testing.T) {
+	target := targetFor(2299)
+
+	line := `curl -s -o /dev/null -w "%{http_code}\n" http://localhost/; ps aux | grep nginx`
+	cmd := target.RunLine(line, false)
+
+	if last := cmd.Args[len(cmd.Args)-1]; last != line {
+		t.Errorf("remote command = %q, want the line untouched", last)
+	}
+	if !contains(cmd.Args, "-T") {
+		t.Errorf("args = %v, want -T for a non-interactive command", cmd.Args)
+	}
+}
+
+// The environment's name and the container still lead a line, so the forced
+// command knows where it goes on a machine carrying several.
+func TestRunLineIsNamed(t *testing.T) {
+	target := targetFor(2299)
+	target.Name = "shop-production"
+	target.Container = "vinyl"
+
+	cmd := target.RunLine("varnishadm backend.list", false)
+
+	if last := cmd.Args[len(cmd.Args)-1]; last != "shop-production @vinyl varnishadm backend.list" {
+		t.Errorf("remote command = %q, want the name and the container before the line", last)
+	}
+}
+
 // The port is never a constant. It is chosen at random per project in
 // 2000-2999, so a client that assumed 22 or 2231 would be wrong for every
 // project on the platform.

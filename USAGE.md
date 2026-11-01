@@ -155,6 +155,9 @@ vallic ssh staging
 vallic ssh staging -- ls -la /mnt/files/public
 vallic ssh production -- php artisan about
 
+# A whole command line in one quoted argument: pipes and ; included
+vallic ssh production -- 'curl -s localhost | head -5; ls current'
+
 # drush, in a Drupal project
 vallic drush staging -- cr
 vallic drush production -- updb -y
