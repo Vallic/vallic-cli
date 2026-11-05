@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -53,5 +54,35 @@ func TestPromoteDomainSaysWhetherTheOthersRedirect(t *testing.T) {
 				t.Errorf("answer = %+v, want the domain and the message", updated)
 			}
 		})
+	}
+}
+
+// The application is sent on its own, so nothing else about the hostname moves.
+func TestSetDomainApplicationSendsOnlyThat(t *testing.T) {
+	var sent map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&sent); err != nil {
+			t.Errorf("decoding: %v", err)
+		}
+		if r.Method != http.MethodPatch || !strings.HasSuffix(r.URL.Path, "/domains/5") {
+			t.Errorf("sent to %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"domain":{"id":5,"application":"frontend"},"message":"ok"}`))
+	}))
+	defer server.Close()
+
+	client := New(server.URL, anonymous{}, "test")
+
+	updated, err := client.SetDomainApplication(context.Background(), 5, "frontend")
+	if err != nil {
+		t.Fatalf("SetDomainApplication: %v", err)
+	}
+	if updated.Domain.Application != "frontend" {
+		t.Errorf("application = %q", updated.Domain.Application)
+	}
+	if len(sent) != 1 || sent["application"] != "frontend" {
+		t.Errorf("sent %v", sent)
 	}
 }

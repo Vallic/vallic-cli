@@ -308,6 +308,9 @@ vallic domain list production
 vallic domain primary shop.example.com production
 vallic domain canonical shop.example.com production
 
+# Where the repository declares a frontend: which application a hostname reaches
+vallic domain application shop.example.com frontend production
+
 # Give one up
 vallic domain delete old.example.com production
 ```

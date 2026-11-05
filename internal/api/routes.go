@@ -490,6 +490,23 @@ func (c *Client) PromoteDomain(ctx context.Context, domainID int, canonical bool
 	return &out, nil
 }
 
+// SetDomainApplication says which of the environment's applications a hostname
+// reaches: "backend" or "frontend".
+func (c *Client) SetDomainApplication(ctx context.Context, domainID int, application string) (*DomainUpdated, error) {
+	body, err := json.Marshal(map[string]any{"application": application})
+	if err != nil {
+		return nil, err
+	}
+
+	var out DomainUpdated
+
+	if err := c.do(ctx, http.MethodPatch, fmt.Sprintf("/domains/%d", domainID), body, &out); err != nil {
+		return nil, err
+	}
+
+	return &out, nil
+}
+
 // DeleteDomain removes a hostname.
 func (c *Client) DeleteDomain(ctx context.Context, domainID int) (*DomainRemoved, error) {
 	var out DomainRemoved

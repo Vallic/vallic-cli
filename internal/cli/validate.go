@@ -331,6 +331,7 @@ func manifestEntries(manifest *api.Manifest) []manifestEntry {
 	add("mounts", strings.Join(manifest.Mounts, ", "))
 	add("extras", manifestExtras(manifest.Extras))
 	add("backup exclude", strings.Join(manifest.BackupExclude, ", "))
+	add("frontend", manifestFrontend(manifest.Frontend))
 
 	return entries
 }
@@ -410,6 +411,15 @@ func manifestWorkers(workers []api.Worker) string {
 	}
 
 	return strings.Join(parts, ", ")
+}
+
+// manifestFrontend renders the application beside the backend, or nothing.
+func manifestFrontend(frontend *api.ManifestFrontend) string {
+	if frontend == nil {
+		return ""
+	}
+
+	return frontend.Root + " (" + settingsLine(frontend.Runtime) + "), " + frontend.Start
 }
 
 // manifestExtras renders the customer's own machines and how to reach them.
