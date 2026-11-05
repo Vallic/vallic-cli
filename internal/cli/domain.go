@@ -28,6 +28,7 @@ actually being routed.`,
 			domainVerifyCommand(),
 			domainPrimaryCommand(),
 			domainCanonicalCommand(),
+			domainApplicationCommand(),
 			domainDeleteCommand(),
 		},
 	}
@@ -267,6 +268,57 @@ Only one of your own verified hostnames can be canonical. The platform
 hostname cannot, because your own domains would redirect to it.`,
 		Run: func(ctx context.Context, env *Env, args []string) error {
 			return promoteDomain(ctx, env, args, true)
+		},
+	}
+}
+
+func domainApplicationCommand() *Command {
+	return &Command{
+		Name:    "application",
+		Summary: "send a hostname to the backend or the frontend",
+		Usage:   "domain application <hostname> <backend|frontend> [<env>]",
+		Long: `Says which of the environment's applications one of your own hostnames
+reaches, where the repository declares a frontend beside its backend. Your
+hostnames reach the backend until you send them to the frontend.
+
+It stops being primary or canonical as it moves: those are of the application
+it leaves. Choose again among the hostnames of the one it joins.`,
+		Run: func(ctx context.Context, env *Env, args []string) error {
+			if len(args) < 2 {
+				return Usagef(nil, "name a hostname, and backend or frontend")
+			}
+
+			if args[1] != "backend" && args[1] != "frontend" {
+				return Usagef(nil, "%q is neither backend nor frontend", args[1])
+			}
+
+			target, err := env.ResolveEnvironment(ctx, firstOf(args[2:]))
+			if err != nil {
+				return err
+			}
+
+			client, err := env.Client()
+			if err != nil {
+				return err
+			}
+
+			domain, err := findDomain(ctx, client, target.Environment.ID, args[0])
+			if err != nil {
+				return err
+			}
+
+			updated, err := client.SetDomainApplication(ctx, domain.ID, args[1])
+			if err != nil {
+				return err
+			}
+
+			if env.Printer.Structured() {
+				return env.Printer.Value(updated)
+			}
+
+			env.Printer.Good("%s", updated.Message)
+
+			return nil
 		},
 	}
 }

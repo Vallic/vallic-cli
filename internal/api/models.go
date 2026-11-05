@@ -692,6 +692,11 @@ type Domain struct {
 	// environment and cannot be removed on its own.
 	Kind string `json:"kind"`
 
+	// Application is which of the environment's applications it asks to reach:
+	// "backend" or "frontend". With no frontend deployed every hostname reaches
+	// the backend, whatever this says.
+	Application string `json:"application"`
+
 	// IsPrimary is the site's address, which the platform hostname redirects
 	// to; IsCanonical, only ever on a primary custom domain, redirects every
 	// other hostname to it as well.
@@ -1075,6 +1080,18 @@ type Manifest struct {
 	// BackupExclude is what the files backup leaves out beside the
 	// framework's own caches, as the file wrote it.
 	BackupExclude []string `json:"backup_exclude"`
+
+	// Frontend is a Node.js or Bun application beside this one, in a directory
+	// of its own. Nil where the repository declares none.
+	Frontend *ManifestFrontend `json:"frontend"`
+}
+
+// ManifestFrontend is the application a repository runs beside its backend.
+type ManifestFrontend struct {
+	Root    string            `json:"root"`
+	Runtime map[string]string `json:"runtime"`
+	Start   string            `json:"start"`
+	Port    int               `json:"port"`
 }
 
 // ManifestService is one service a repository asked to run beside it.
