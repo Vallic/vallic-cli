@@ -226,7 +226,7 @@ when it is left off.
 | `url [--all] [--open]` | The browsable address, alone on stdout. `--all` lists every name the edge routes |
 | `deploy` · `rollback` · `redeploy` · `release list` | Shipping |
 | `activity list` · `activity get` · `activity log` · `activity cancel` | What the platform has been doing, the log of one task, and calling off one that has not started |
-| `logs` | Where the site's own request and error logs go — the project's destination and the machine's copy. Not a tail: Vallic Cloud does not keep them |
+| `logs [--follow] [--since] [--source] [--output]` | The site's own logs, read off its machines over your SSH key: containers, cron, the application's log files and the proxy's requests. `--follow` is a live tail, `--output` saves a window to a file, `--where` says where the project sends them besides |
 | `ssh` · `sql` · `db dump\|export\|import\|size` · `mount` | Getting inside. `db dump` writes a file named for the project and environment, all of it or `--table`s; `db size` shows the largest tables; `sql -- <query>` runs one query |
 | `drush` | `drush` in the container, over the same forced command `ssh --` uses |
 | `var list\|get\|set\|delete\|import\|apply` | Variables, at either scope; `import` adds a `.env`, `apply` restarts the site with them now |
