@@ -70,8 +70,8 @@ to production.`,
 			redeployCommand(),
 			releaseCommand(),
 			activityCommand(),
-			// Where the site's own logs are, which is not here. Beside
-			// activity because the two names are the ones people confuse.
+			// The site's own logs, read off its machines. Beside activity
+			// because the two names are the ones people confuse.
 			logsCommand(),
 
 			// Shell plumbing. Last because it is about the terminal rather

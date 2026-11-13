@@ -137,8 +137,14 @@ vallic activity log 1234 --follow
 # Call off a deploy still waiting in the queue; one already running finishes
 vallic activity cancel 1235
 
-# Where the site's logs go
+# The site's own logs: the last 100 lines, a live tail, a window, one kind
 vallic logs production
+vallic logs production --follow
+vallic logs production --since 1h --source proxy
+vallic logs production --since 24h --output production.log.gz
+
+# Where the project sends them besides
+vallic logs production --where
 
 # CPU, memory and disk: now, on average and at peak
 vallic metrics production

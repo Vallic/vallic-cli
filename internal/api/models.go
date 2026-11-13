@@ -196,6 +196,12 @@ type SSHTarget struct {
 	DBSize          string   `json:"db_size"`
 	DBExportOptions []string `json:"db_export_options"`
 
+	// Logs is the verb that reads the environment's own logs off the
+	// machine, for `vallic logs`. Empty where a machine's agent is older
+	// than the shell that answers it, and against a control plane that
+	// predates it.
+	Logs string `json:"logs"`
+
 	// FilesPath is the one writable directory that is the same for every
 	// project type and survives every deploy. What rsync should be aimed at.
 	FilesPath string `json:"files_path"`
