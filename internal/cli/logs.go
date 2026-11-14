@@ -334,7 +334,12 @@ func runLogStreams(ctx context.Context, streams []logStream, out, errOut io.Writ
 	for _, stream := range streams {
 		one := &running{logStream: stream, lines: make(chan string, 256), stderr: &limitedBuffer{limit: 4 << 10}}
 
+		// The ssh commands come wired to this process's terminal (vssh's
+		// command()), and a stream that already has somewhere to write
+		// cannot also be read: exec refuses with "Stdout already set". The
+		// lines are read here, so the output is taken back first.
 		stream.cmd.Stdin = nil
+		stream.cmd.Stdout = nil
 		stream.cmd.Stderr = one.stderr
 		pipe, err := stream.cmd.StdoutPipe()
 		if err != nil {
