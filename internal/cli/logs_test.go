@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -186,6 +187,22 @@ func TestSeveralMachinesAreReadInOrderOfTime(t *testing.T) {
 	lines, err = runLogStreams(context.Background(), []logStream{{cmd: script("a line", "another")}}, &out, &errOut, logsRequest{})
 	if err != nil || lines != 2 || out.String() != "a line\nanother\n" {
 		t.Errorf("one machine read %q, %d lines, %v", out.String(), lines, err)
+	}
+}
+
+// The ssh commands the target builds write to this process's terminal; the
+// reader takes their output back rather than failing on "Stdout already
+// set", which is what `vallic logs` answered on its first real run.
+func TestStreamWiredToTheTerminalIsRead(t *testing.T) {
+	cmd := exec.Command("printf", "%s\n", "2026-11-13T10:00:00.000Z [cron] ran")
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	var out, errOut strings.Builder
+	lines, err := runLogStreams(context.Background(), []logStream{{cmd: cmd}}, &out, &errOut, logsRequest{})
+	if err != nil || lines != 1 || out.String() != "2026-11-13T10:00:00.000Z [cron] ran\n" {
+		t.Errorf("a stream wired to the terminal read %q, %d lines, %v", out.String(), lines, err)
 	}
 }
 
